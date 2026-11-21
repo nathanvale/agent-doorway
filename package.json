@@ -18,7 +18,7 @@
     "format": "biome format --write ."
   },
   "dependencies": {
-    "agent-cli-kernel": "github:nathanvale/agent-cli-kernel#c0845947d44cd2b18f2a08685902f3f6efa38115"
+    "agent-cli-kernel": "github:nathanvale/agent-cli-kernel#426e5dbdb09fada8950f3aaea3b5204f1da40907"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
