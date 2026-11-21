@@ -1,42 +1,86 @@
-import type { commonCauses } from "agent-cli-kernel";
-import { command } from "agent-cli-kernel";
-
-const noInput = {
-  arguments: [],
-  options: [],
-  constraints: [],
-  deadlineSupported: false,
-  additionalArguments: false,
-  additionalOptions: false,
-} as const;
-
-const noEffects = {
-  completed: [],
-  remaining: [],
-  uncertain: [],
-  inventoryComplete: true,
-} as const;
-
-const succeeded = "SUCCESS_UNCHANGED" satisfies keyof typeof commonCauses;
+import { command, contractFor } from "agent-cli-kernel";
+import type { ParsedPath } from "agent-cli-kernel";
+import { programsAddon } from "agent-cli-kernel/addons/programs";
+import { stateAddon } from "agent-cli-kernel/addons/state";
+import {
+  causes,
+  cli,
+  noInput,
+  nothingChanged,
+  unchangedSuccess,
+} from "./causes.ts";
+import { openCommand } from "./open.ts";
+import { pendingCommand } from "./pending.ts";
+import type { DoorwayState } from "./pending.ts";
+import { statePath } from "./settings.ts";
+import type { Environment } from "./settings.ts";
 
 const status = command({
-  identity: "agent-doorway.status",
+  identity: "doorway.status",
   route: ["status"],
-  summary: "Report that this command-line tool runs.",
+  summary: "Report that doorway runs.",
   input: noInput,
   capabilities: {},
   run: (_input, context) =>
     context.result(
       {
-        commandIdentity: "agent-doorway.status",
-        causeCode: succeeded,
+        commandIdentity: "doorway.status",
+        causeCode: unchangedSuccess,
       },
       {
-        message: "The command-line tool runs.",
+        message: "Doorway runs.",
         data: { ready: true },
-        effects: noEffects,
+        effects: nothingChanged,
       },
     ),
 });
+
+function buildCommands(
+  state: DoorwayState,
+  stateFolder: string,
+  environment: Environment,
+  parsePath: (value: string) => ParsedPath,
+  editorTimeoutMilliseconds?: number,
+) {
+  return [
+    status,
+    openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
+    pendingCommand(state, stateFolder),
+  ] as const;
+}
+
+export function createDoorway(
+  environment: Environment,
+  installedAddons: readonly ("state" | "programs")[] = ["state", "programs"],
+  editorTimeoutMilliseconds?: number,
+) {
+  const stateFolder = statePath(environment);
+  const state = stateAddon({
+    root: stateFolder,
+    report: "doorway.pending",
+  });
+  const parsePath = (value: string): ParsedPath =>
+    contract.boundary.path(value);
+  const contract = contractFor({
+    cli,
+    commands: buildCommands(
+      state,
+      stateFolder,
+      environment,
+      parsePath,
+      editorTimeoutMilliseconds,
+    ),
+    causes,
+    state: state.descriptor,
+    installedAddons,
+  });
+  const setup = {
+    emergencyRecord: state.emergencyRecord,
+    addons: {
+      programs: programsAddon(),
+    },
+  };
+  return { contract, state, setup };
+}
 
 export const commands = [status] as const;
