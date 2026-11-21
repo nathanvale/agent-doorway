@@ -1110,4 +1110,154 @@ describe("doorway open and doorway pending through the real CLI", () => {
       fixture.cleanup();
     }
   });
+
+  test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case for pending", async () => {
+    const fixture = createFixture();
+    try {
+      const sigtermFile = join(fixture.root, "editor-sigterm");
+      makeScript(fixture.fakeEditor, [
+        'import { writeFileSync } from "node:fs";',
+        'process.on("SIGTERM", () => {',
+        `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
+        "  process.exit(0);",
+        "});",
+        "setTimeout(() => {",
+        "  process.exit(1);",
+        "}, 10_000);",
+      ]);
+
+      const doorway = createDoorway(
+        fixture.environment,
+        ["state", "programs"],
+        2_000,
+      );
+      const ran = await runInProcess(
+        doorway.contract,
+        doorway.setup,
+      )(["open", "example", "--json"]);
+      expect(existsSync(sigtermFile)).toBe(true);
+      expect(ran.kind).toBe("envelope");
+      if (ran.kind !== "envelope") return;
+      expect(ran.exitCode).toBe(3);
+      expect(ran.envelope.result).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+        data: null,
+        effects: {
+          completed: [],
+          remaining: [],
+          uncertain: ["editor.open"],
+          inventoryComplete: true,
+        },
+        handoff: {
+          owner: "operator",
+          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
+        },
+      });
+
+      const pending = invokeCli(fixture.environment, "pending", "--json");
+      expect(pending.exitCode).toBe(0);
+      expect(parseJson(pending.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.pending",
+          causeCode: "SUCCESS_UNCHANGED",
+          data: {
+            unfinished: [{ commandIdentity: "doorway.open" }],
+          },
+        },
+      });
+
+      const blocked = invokeCli(
+        fixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(blocked.exitCode).toBe(3);
+      expect(parseJson(blocked.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          outcome: "refused",
+          transactionState: "unchanged",
+          causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
+        },
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("treats a launcher result with missing programDetails as not confirmed even with exit 0 and terminationConfirmed", async () => {
+    const fixture = createFixture();
+    try {
+      const doorway = createDoorway(fixture.environment);
+      const fakePrograms: RunAddon<ProgramsCapability> = {
+        attach: () => ({
+          capability: {
+            inspect: (): Promise<ProgramResult> =>
+              Promise.resolve({
+                stdout: `${sampleContainerId} example-box running\n`,
+                stderr: "",
+                exitCode: 0,
+                terminationConfirmed: true,
+                outputTruncated: false,
+              }),
+            supplied: (): Promise<ProgramResult> =>
+              Promise.reject(new Error("unused")),
+            domain: (effect) => ({
+              effect: effect.effect,
+              start: (): Promise<ProgramResult> =>
+                effect.admitStart(effect.runId, effect.effect, () =>
+                  Promise.resolve({
+                    stdout: "",
+                    stderr: "",
+                    exitCode: 0,
+                    terminationConfirmed: true,
+                    outputTruncated: false,
+                  }),
+                ),
+            }),
+          },
+          settle: () => Promise.resolve(true),
+          killNow: () => undefined,
+        }),
+      };
+
+      const ran = await runInProcess(doorway.contract, {
+        emergencyRecord: doorway.state.emergencyRecord,
+        addons: { programs: fakePrograms },
+      })(["open", "example", "--json"]);
+      expect(ran.kind).toBe("envelope");
+      if (ran.kind !== "envelope") return;
+      expect(ran.exitCode).toBe(3);
+      expect(ran.envelope.result).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+        effects: {
+          completed: [],
+          remaining: [],
+          uncertain: ["editor.open"],
+          inventoryComplete: true,
+        },
+      });
+
+      const pending = invokeCli(fixture.environment, "pending", "--json");
+      expect(pending.exitCode).toBe(0);
+      expect(parseJson(pending.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.pending",
+          causeCode: "SUCCESS_UNCHANGED",
+          data: {
+            unfinished: [{ commandIdentity: "doorway.open" }],
+          },
+        },
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });

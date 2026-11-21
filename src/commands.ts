@@ -40,10 +40,11 @@ function buildCommands(
   stateFolder: string,
   environment: Environment,
   parsePath: (value: string) => ParsedPath,
+  editorTimeoutMilliseconds?: number,
 ) {
   return [
     status,
-    openCommand(state, environment, parsePath),
+    openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
     pendingCommand(state, stateFolder),
   ] as const;
 }
@@ -51,6 +52,7 @@ function buildCommands(
 export function createDoorway(
   environment: Environment,
   installedAddons: readonly ("state" | "programs")[] = ["state", "programs"],
+  editorTimeoutMilliseconds?: number,
 ) {
   const stateFolder = statePath(environment);
   const state = stateAddon({
@@ -61,7 +63,13 @@ export function createDoorway(
     contract.boundary.path(value);
   const contract = contractFor({
     cli,
-    commands: buildCommands(state, stateFolder, environment, parsePath),
+    commands: buildCommands(
+      state,
+      stateFolder,
+      environment,
+      parsePath,
+      editorTimeoutMilliseconds,
+    ),
     causes,
     state: state.descriptor,
     installedAddons,

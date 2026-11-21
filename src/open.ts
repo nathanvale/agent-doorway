@@ -32,7 +32,7 @@ import type { Environment } from "./settings.ts";
 
 const identity = "doorway.open";
 const remoteTimeoutMilliseconds = 30_000;
-const editorTimeoutMilliseconds = 60_000;
+const defaultEditorTimeoutMilliseconds = 60_000;
 const programOutputLimitBytes = 1_048_576;
 const programShutdownMilliseconds = 1_000;
 
@@ -105,10 +105,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function editorStoppedCleanly(result: ProgramResult): boolean {
+  const details = programDetails(result);
+  return (
+    result.terminationConfirmed &&
+    details !== undefined &&
+    !details.timedOut &&
+    result.exitCode !== null
+  );
+}
+
 export function openCommand(
   state: DoorwayState,
   environment: Environment,
   parsePath: (value: string) => ParsedPath,
+  editorTimeoutMilliseconds = defaultEditorTimeoutMilliseconds,
 ) {
   return changing({
     identity,
@@ -615,7 +626,7 @@ export function openCommand(
                 throw error;
               }
             },
-            (ran) => Promise.resolve(ran.terminationConfirmed),
+            (ran) => Promise.resolve(editorStoppedCleanly(ran)),
           );
         },
       );
@@ -629,20 +640,29 @@ export function openCommand(
 
       if (
         outcome.proof.transactionState !== "completed" ||
-        editorResult === undefined
-      )
+        editorResult === undefined ||
+        !editorStoppedCleanly(editorResult)
+      ) {
+        const unconfirmedDetail =
+          failureDetail !== ""
+            ? failureDetail
+            : editorResult !== undefined &&
+                programDetails(editorResult)?.timedOut === true
+              ? "the editor launcher timed out"
+              : "";
         return context.result(
           {
             commandIdentity: identity,
             causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
           },
           {
-            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${failureDetail === "" ? "" : `: ${failureDetail}`}.`,
+            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${unconfirmedDetail === "" ? "" : `: ${unconfirmedDetail}`}.`,
             data: null,
             transaction: outcome.proof,
             attemptedEffect: "editor.open",
           },
         );
+      }
 
       if (editorResult.exitCode !== 0)
         return context.result(
@@ -651,7 +671,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_OPEN_FAILED",
           },
           {
-            message: `The isolated editor exited with ${editorResult.exitCode === null ? "a signal or timeout" : `code ${String(editorResult.exitCode)}`} for ${destination.name}. No unfinished case remains; you can run doorway open again.`,
+            message: `The isolated editor exited with code ${String(editorResult.exitCode)} for ${destination.name}. No unfinished case remains; you can run doorway open again.`,
             data: null,
             transaction: outcome.proof,
             attemptedEffect: "editor.open",
