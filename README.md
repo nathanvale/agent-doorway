@@ -6,10 +6,13 @@ Source packet: `https://github.com/nathanvale/agent-doorway`
 
 ```sh
 bun install --frozen-lockfile
-bun run start -- --help
-bun run start -- status
+bun link
+doorway --help
+doorway status
 bun run check
 ```
+
+`bun link` places `doorway` in Bun's global bin folder so it runs from any folder.
 
 ## Adding a command
 
