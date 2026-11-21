@@ -1,7 +1,7 @@
 ---
 
 name: agent-cli-kernel
-description: Write commands on the agent-cli-kernel package. Use when code imports agent-cli-kernel to declare a command or its input, declare a result it can produce (a station), build the contract with contractFor, test a command, or read a throw from contractFor when the CLI starts.
+description: Write commands on the agent-cli-kernel package. Use when code imports agent-cli-kernel to declare a command or its input, write a command that changes something, declare a result it can produce (a station), build the contract with contractFor, test a command, or read a throw from contractFor when the CLI starts.
 ---
 
 # Writing commands on agent-cli-kernel
@@ -23,4 +23,4 @@ one `package.json` pins, or when the installed kernel does not hold the full
 skill.
 
 Full skill: `node_modules/agent-cli-kernel/skills/agent-cli-kernel/SKILL.md`
-Pinned commit: `c0845947d44cd2b18f2a08685902f3f6efa38115`
+Pinned commit: `426e5dbdb09fada8950f3aaea3b5204f1da40907`
