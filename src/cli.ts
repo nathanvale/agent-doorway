@@ -1,10 +1,6 @@
-import { commands } from "./commands.ts";
-import { contractFor, runProcess } from "agent-cli-kernel";
+import { runProcess } from "agent-cli-kernel";
+import { createDoorway } from "./commands.ts";
 
-const contract = contractFor({
-  cli: "agent-doorway",
-  commands,
-  installedAddons: [],
-});
+const doorway = createDoorway(process.env, ["state", "programs"]);
 
-await runProcess(contract)(process.argv.slice(2));
+await runProcess(doorway.contract, doorway.setup)(process.argv.slice(2));

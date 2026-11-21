@@ -18,7 +18,7 @@ test("status reports that the command-line tool runs, from any folder", () => {
     }).toEqual({ exitCode: 0, stderr: "" });
     expect(JSON.parse(child.stdout.toString())).toMatchObject({
       result: {
-        commandIdentity: "agent-doorway.status",
+        commandIdentity: "doorway.status",
         causeCode: "SUCCESS_UNCHANGED",
         data: { ready: true },
       },
