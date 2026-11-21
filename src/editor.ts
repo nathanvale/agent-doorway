@@ -11,12 +11,22 @@ export type EditorPlan = {
   readonly requiredFolders: readonly string[];
 };
 
+export function requiredEditorFolders(
+  settings: DoorwaySettings,
+  home: string,
+): readonly [string, string] {
+  return [
+    expandHome(settings.editor.userDataFolder, home),
+    expandHome(settings.editor.extensionsFolder, home),
+  ];
+}
+
 export function remoteAuthority(
   remoteHost: RemoteHostSettings,
   destination: DestinationSettings,
 ): string {
   const attach = JSON.stringify({
-    containerName: `/${destination.container}`,
+    containerName: destination.containerId,
     settings: { host: remoteHost.dockerEndpoint },
   });
   return `attached-container%2B${Buffer.from(attach).toString("hex")}@ssh-remote%2B${remoteHost.sshAlias}`;
@@ -30,8 +40,10 @@ export function editorArguments(
   place?: string,
 ): EditorPlan {
   const authority = remoteAuthority(remoteHost, destination);
-  const userDataFolder = expandHome(settings.editor.userDataFolder, home);
-  const extensionsFolder = expandHome(settings.editor.extensionsFolder, home);
+  const [userDataFolder, extensionsFolder] = requiredEditorFolders(
+    settings,
+    home,
+  );
   const chosenPlace = place ?? destination.folder;
   const openArgs = chosenPlace.endsWith(".code-workspace")
     ? ["--file-uri", `vscode-remote://${authority}${chosenPlace}`]

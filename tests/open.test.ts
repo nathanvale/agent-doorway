@@ -5,7 +5,6 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
-  watch,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -65,28 +64,22 @@ function makeScript(pathValue: string, lines: readonly string[]): string {
 }
 
 function waitForFile(
-  folder: string,
   filePath: string,
   timeoutMilliseconds = 10_000,
 ): Promise<void> {
   if (existsSync(filePath)) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const watcher = watch(folder, () => {
+    const interval = setInterval(() => {
       if (existsSync(filePath)) {
+        clearInterval(interval);
         clearTimeout(timer);
-        watcher.close();
         resolve();
       }
-    });
+    }, 20);
     const timer = setTimeout(() => {
-      watcher.close();
+      clearInterval(interval);
       reject(new Error(`Timed out waiting for ${filePath}.`));
     }, timeoutMilliseconds);
-    if (existsSync(filePath)) {
-      clearTimeout(timer);
-      watcher.close();
-      resolve();
-    }
   });
 }
 
@@ -272,6 +265,45 @@ describe("editor arguments", () => {
       `vscode-remote://${authority}/workspace/example.code-workspace`,
     ]);
   });
+
+  test("addresses the pinned 64-character container ID rather than the container name and separates different pinned IDs", () => {
+    const settings: DoorwaySettings = {
+      version: 1,
+      editor: {
+        userDataFolder: "/data",
+        extensionsFolder: "/extensions",
+      },
+      remoteHosts: [sampleHost],
+      destinations: [sampleDestination],
+    };
+    const authority = remoteAuthority(sampleHost, sampleDestination);
+    const prefix = "attached-container%2B";
+    const suffix = `@ssh-remote%2B${sampleHost.sshAlias}`;
+    expect(authority.startsWith(prefix)).toBe(true);
+    expect(authority.endsWith(suffix)).toBe(true);
+    const encodedPayload = authority.slice(prefix.length, -suffix.length);
+    const decodedPayload: unknown = JSON.parse(
+      Buffer.from(encodedPayload, "hex").toString("utf8"),
+    );
+    expect(decodedPayload).toEqual({
+      containerName: sampleContainerId,
+      settings: { host: sampleHost.dockerEndpoint },
+    });
+
+    const otherDestination: DestinationSettings = {
+      ...sampleDestination,
+      containerId: otherContainerId,
+    };
+    const otherAuthority = remoteAuthority(sampleHost, otherDestination);
+    expect(otherAuthority).not.toBe(authority);
+    expect(
+      editorArguments(settings, sampleHost, otherDestination, "/work-home")
+        .args,
+    ).not.toEqual(
+      editorArguments(settings, sampleHost, sampleDestination, "/work-home")
+        .args,
+    );
+  });
 });
 
 describe("remote inventory and ssh arguments", () => {
@@ -334,7 +366,22 @@ describe("remote inventory and ssh arguments", () => {
     ).toBe("stopped");
     expect(
       destinationState(
-        { ...sampleDestination, container: "absent" },
+        {
+          ...sampleDestination,
+          container: "renamed-box",
+          containerId: sampleContainerId,
+        },
+        parsed.containers,
+      ),
+    ).toBe("replaced");
+    expect(
+      destinationState(
+        {
+          ...sampleDestination,
+          container: "absent",
+          containerId:
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
         parsed.containers,
       ),
     ).toBe("missing");
@@ -677,11 +724,36 @@ describe("doorway open and doorway pending through the real CLI", () => {
     try {
       const ran = invokeCli(replaced.environment, "open", "example", "--json");
       expect(ran.exitCode).toBe(3);
+      expect(ran.stderr).toBe("");
       expect(parseJson(ran.stdout)).toMatchObject({
-        result: { causeCode: "DOMAIN_DOORWAY_DESTINATION_REPLACED" },
+        result: {
+          causeCode: "DOMAIN_DOORWAY_DESTINATION_REPLACED",
+          data: null,
+        },
       });
+      expect(existsSync(replaced.editorLog)).toBe(false);
     } finally {
       replaced.cleanup();
+    }
+
+    const renamed = createFixture({
+      sshLines: [
+        `process.stdout.write(${JSON.stringify(`${sampleContainerId} renamed-box running\n`)});`,
+      ],
+    });
+    try {
+      const ran = invokeCli(renamed.environment, "open", "example", "--json");
+      expect(ran.exitCode).toBe(3);
+      expect(ran.stderr).toBe("");
+      expect(parseJson(ran.stdout)).toMatchObject({
+        result: {
+          causeCode: "DOMAIN_DOORWAY_DESTINATION_REPLACED",
+          data: null,
+        },
+      });
+      expect(existsSync(renamed.editorLog)).toBe(false);
+    } finally {
+      renamed.cleanup();
     }
 
     const stoppedFixture = createFixture({
@@ -703,6 +775,99 @@ describe("doorway open and doorway pending through the real CLI", () => {
       expect(existsSync(stoppedFixture.editorLog)).toBe(false);
     } finally {
       stoppedFixture.cleanup();
+    }
+  });
+
+  test("addresses distinct pinned container IDs separately through the real CLI and refuses a replacement taking the container name", () => {
+    const firstFixture = createFixture();
+    const secondFixture = createFixture({
+      destination: { containerId: otherContainerId },
+      sshLines: [
+        `process.stdout.write(${JSON.stringify(`${otherContainerId} example-box running\n`)});`,
+      ],
+    });
+    try {
+      const firstRun = invokeCli(
+        firstFixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      const secondRun = invokeCli(
+        secondFixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(firstRun.exitCode).toBe(0);
+      expect(secondRun.exitCode).toBe(0);
+      expect(firstRun.stderr).toBe("");
+      expect(secondRun.stderr).toBe("");
+
+      const firstRecorded: unknown = JSON.parse(
+        readFileSync(firstFixture.editorLog, "utf8"),
+      );
+      const secondRecorded: unknown = JSON.parse(
+        readFileSync(secondFixture.editorLog, "utf8"),
+      );
+      const firstAuthority = remoteAuthority(sampleHost, sampleDestination);
+      const secondAuthority = remoteAuthority(sampleHost, {
+        ...sampleDestination,
+        containerId: otherContainerId,
+      });
+      expect(firstAuthority).not.toBe(secondAuthority);
+      expect(firstRecorded).toMatchObject({
+        argv: [
+          "--user-data-dir",
+          firstFixture.userDataFolder,
+          "--extensions-dir",
+          firstFixture.extensionsFolder,
+          "--new-window",
+          "--folder-uri",
+          `vscode-remote://${firstAuthority}/workspace`,
+          "--file-uri",
+          `vscode-remote://${firstAuthority}/workspace/GUIDE.md`,
+        ],
+      });
+      expect(secondRecorded).toMatchObject({
+        argv: [
+          "--user-data-dir",
+          secondFixture.userDataFolder,
+          "--extensions-dir",
+          secondFixture.extensionsFolder,
+          "--new-window",
+          "--folder-uri",
+          `vscode-remote://${secondAuthority}/workspace`,
+          "--file-uri",
+          `vscode-remote://${secondAuthority}/workspace/GUIDE.md`,
+        ],
+      });
+
+      rmSync(firstFixture.editorLog, { force: true });
+      makeScript(firstFixture.fakeSsh, [
+        `process.stdout.write(${JSON.stringify(`${otherContainerId} example-box running\n`)});`,
+      ]);
+      const replacedAfterInventory = invokeCli(
+        firstFixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(replacedAfterInventory.exitCode).toBe(3);
+      expect(replacedAfterInventory.stderr).toBe("");
+      expect(parseJson(replacedAfterInventory.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          outcome: "refused",
+          transactionState: "unchanged",
+          causeCode: "DOMAIN_DOORWAY_DESTINATION_REPLACED",
+          data: null,
+        },
+      });
+      expect(existsSync(firstFixture.editorLog)).toBe(false);
+    } finally {
+      firstFixture.cleanup();
+      secondFixture.cleanup();
     }
   });
 
@@ -754,24 +919,36 @@ describe("doorway open and doorway pending through the real CLI", () => {
       const readyFile = join(fixture.root, "editor-ready");
       const releaseFile = join(fixture.root, "editor-release");
       makeScript(fixture.fakeEditor, [
-        'import { existsSync, watch, writeFileSync } from "node:fs";',
+        'import { existsSync, writeFileSync } from "node:fs";',
         `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
         `if (!existsSync(${JSON.stringify(releaseFile)})) {`,
-        `  await new Promise((resolve) => {`,
-        `    const w = watch(${JSON.stringify(fixture.root)}, () => {`,
-        `      if (existsSync(${JSON.stringify(releaseFile)})) { w.close(); resolve(undefined); }`,
-        "    });",
-        `    if (existsSync(${JSON.stringify(releaseFile)})) { w.close(); resolve(undefined); }`,
+        "  await new Promise((resolve, reject) => {",
+        "    const interval = setInterval(() => {",
+        `      if (existsSync(${JSON.stringify(releaseFile)})) {`,
+        "        clearInterval(interval);",
+        "        clearTimeout(timer);",
+        "        resolve(undefined);",
+        "      }",
+        "    }, 20);",
+        "    const timer = setTimeout(() => {",
+        "      clearInterval(interval);",
+        '      reject(new Error("Timed out waiting for release file."));',
+        "    }, 15_000);",
         "  });",
         "}",
       ]);
 
       const first = Bun.spawn(
         [process.execPath, "run", cliEntry, "open", "example", "--json"],
-        { env: fixture.environment, stdout: "pipe", stderr: "pipe" },
+        {
+          env: fixture.environment,
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 20_000,
+        },
       );
       try {
-        await waitForFile(fixture.root, readyFile);
+        await waitForFile(readyFile);
         const held = invokeCli(
           fixture.environment,
           "open",
@@ -804,9 +981,14 @@ describe("doorway open and doorway pending through the real CLI", () => {
 
       const killed = Bun.spawn(
         [process.execPath, "run", cliEntry, "open", "example", "--json"],
-        { env: fixture.environment, stdout: "pipe", stderr: "pipe" },
+        {
+          env: fixture.environment,
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 20_000,
+        },
       );
-      await waitForFile(fixture.root, readyFile);
+      await waitForFile(readyFile);
       const editorPid = Number(readFileSync(readyFile, "utf8").trim());
       killed.kill("SIGKILL");
       await killed.exited;

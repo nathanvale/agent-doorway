@@ -102,10 +102,16 @@ export function destinationState(
   destination: DestinationSettings,
   containers: readonly ObservedContainer[],
 ): DestinationState {
-  const observed = containers.find((container) =>
+  const byName = containers.find((container) =>
     container.names.includes(destination.container),
   );
-  if (observed === undefined) return "missing";
-  if (observed.id !== destination.containerId) return "replaced";
-  return observed.running ? "running" : "stopped";
+  if (byName !== undefined) {
+    if (byName.id !== destination.containerId) return "replaced";
+    return byName.running ? "running" : "stopped";
+  }
+  const byId = containers.find(
+    (container) => container.id === destination.containerId,
+  );
+  if (byId !== undefined) return "replaced";
+  return "missing";
 }

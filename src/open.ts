@@ -11,7 +11,7 @@ import {
   nothingChanged,
   stationWords,
 } from "./causes.ts";
-import { editorArguments } from "./editor.ts";
+import { editorArguments, requiredEditorFolders } from "./editor.ts";
 import { envExecutablePath, isolatedProgram } from "./env-program.ts";
 import type { DoorwayState } from "./pending.ts";
 import {
@@ -455,14 +455,7 @@ export function openCommand(
 
       const { destination, remoteHost } = found;
       const home = homeOf(environment);
-      const plan = editorArguments(
-        loaded.settings,
-        remoteHost,
-        destination,
-        home,
-        input.place,
-      );
-      if (!(await foldersExist(plan.requiredFolders)))
+      if (!(await foldersExist(requiredEditorFolders(loaded.settings, home))))
         return context.result(
           {
             commandIdentity: identity,
@@ -576,6 +569,13 @@ export function openCommand(
           },
         );
 
+      const plan = editorArguments(
+        loaded.settings,
+        remoteHost,
+        destination,
+        home,
+        input.place,
+      );
       const editorCall = isolatedProgram(
         parsePath(editorExecutable),
         plan.args,
