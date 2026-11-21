@@ -54,6 +54,8 @@ export function sshArguments(
     "-o",
     "ControlMaster=no",
     "-o",
+    "ControlPath=none",
+    "-o",
     "ForwardAgent=no",
     "-o",
     "ClearAllForwardings=yes",

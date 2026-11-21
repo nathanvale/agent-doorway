@@ -9,13 +9,20 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type {
+  ParsedPath,
   ProgramResult,
   ProgramsCapability,
   RunAddon,
 } from "agent-cli-kernel";
-import { runInProcess } from "agent-cli-kernel";
-import { editorArguments, remoteAuthority } from "../src/editor.ts";
+import { contractFor, runInProcess } from "agent-cli-kernel";
+import { programsAddon } from "agent-cli-kernel/addons/programs";
+import { stateAddon } from "agent-cli-kernel/addons/state";
+import { causes, cli } from "../src/causes.ts";
 import { createDoorway } from "../src/commands.ts";
+import { editorArguments, remoteAuthority } from "../src/editor.ts";
+import { openCommand } from "../src/open.ts";
+import { pendingCommand } from "../src/pending.ts";
+import type { DoorwayState } from "../src/pending.ts";
 import {
   destinationState,
   inventoryCommand,
@@ -324,6 +331,8 @@ describe("remote inventory and ssh arguments", () => {
       "UpdateHostKeys=no",
       "-o",
       "ControlMaster=no",
+      "-o",
+      "ControlPath=none",
       "-o",
       "ForwardAgent=no",
       "-o",
@@ -1257,6 +1266,78 @@ describe("doorway open and doorway pending through the real CLI", () => {
         },
       });
     } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("refuses with a declared state station when the state journal cannot append effect-started before starting the editor", async () => {
+    const fixture = createFixture();
+    let eventsFile: string | undefined;
+    try {
+      const realState = stateAddon({
+        root: fixture.stateFolder,
+        report: "doorway.pending",
+      });
+      const failingJournalState: DoorwayState = {
+        ...realState,
+        transaction: (capability, declaration, work) =>
+          realState.transaction(
+            capability,
+            declaration,
+            (transaction, published) => {
+              eventsFile = join(
+                fixture.stateFolder,
+                "operations",
+                published.operationId,
+                "events",
+              );
+              chmodSync(eventsFile, 0o400);
+              return work(transaction, published);
+            },
+          ),
+      };
+      const parsePath = (value: string): ParsedPath =>
+        contract.boundary.path(value);
+      const contract = contractFor({
+        cli,
+        commands: [
+          openCommand(failingJournalState, fixture.environment, parsePath),
+          pendingCommand(realState, fixture.stateFolder),
+        ],
+        causes,
+        state: realState.descriptor,
+        installedAddons: ["state", "programs"],
+      });
+
+      const ran = await runInProcess(contract, {
+        emergencyRecord: realState.emergencyRecord,
+        addons: { programs: programsAddon() },
+      })(["open", "example", "--json"]);
+      expect(ran.kind).toBe("envelope");
+      if (ran.kind !== "envelope") return;
+      expect(ran.exitCode).toBe(3);
+      expect(ran.envelope.result).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "refused",
+        transactionState: "unchanged",
+        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        data: null,
+        effects: {
+          completed: [],
+          remaining: ["editor.open"],
+          uncertain: [],
+          inventoryComplete: true,
+        },
+        handoff: {
+          owner: "operator",
+          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
+        },
+      });
+      expect(existsSync(fixture.editorLog)).toBe(false);
+    } finally {
+      if (eventsFile !== undefined && existsSync(eventsFile)) {
+        chmodSync(eventsFile, 0o600);
+      }
       fixture.cleanup();
     }
   });

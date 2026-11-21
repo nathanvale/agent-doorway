@@ -369,7 +369,7 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
         trigger:
-          "The doorway state folder is unavailable or refused coordination.",
+          "The doorway state folder is unavailable, refused coordination, or could not record the operation before starting the isolated editor.",
         repairAction:
           "Inspect the state folder named by DOORWAY_STATE and repair it before running doorway open again.",
         guidance: { handoff: inspectPending },
@@ -608,26 +608,31 @@ export function openCommand(
           },
         },
         async (transaction) => {
-          await transaction.record(
-            "editor.open",
-            async (effect) => {
-              try {
-                const ran = await context.programs.domain(effect).start({
-                  executable: editorCall.executable,
-                  args: editorCall.args,
-                  timeoutMilliseconds: editorTimeoutMilliseconds,
-                  outputLimitBytes: programOutputLimitBytes,
-                  shutdownMilliseconds: programShutdownMilliseconds,
-                });
-                editorResult = ran;
-                return ran;
-              } catch (error) {
-                failureDetail = errorMessage(error);
-                throw error;
-              }
-            },
-            (ran) => Promise.resolve(editorStoppedCleanly(ran)),
-          );
+          try {
+            await transaction.record(
+              "editor.open",
+              async (effect) => {
+                try {
+                  const ran = await context.programs.domain(effect).start({
+                    executable: editorCall.executable,
+                    args: editorCall.args,
+                    timeoutMilliseconds: editorTimeoutMilliseconds,
+                    outputLimitBytes: programOutputLimitBytes,
+                    shutdownMilliseconds: programShutdownMilliseconds,
+                  });
+                  editorResult = ran;
+                  return ran;
+                } catch (error) {
+                  failureDetail = errorMessage(error);
+                  throw error;
+                }
+              },
+              (ran) => Promise.resolve(editorStoppedCleanly(ran)),
+            );
+          } catch (error) {
+            if (failureDetail === "") failureDetail = errorMessage(error);
+            throw error;
+          }
         },
       );
 
@@ -636,6 +641,19 @@ export function openCommand(
         return context.result(
           { commandIdentity: identity, causeCode: refused.causeCode },
           { message: refused.message, data: null, effects: nothingChanged },
+        );
+
+      if (outcome.proof.transactionState === "unchanged")
+        return context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          },
+          {
+            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.`,
+            data: null,
+            effects: outcome.proof.effects,
+          },
         );
 
       if (
