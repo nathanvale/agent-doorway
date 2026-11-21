@@ -12,10 +12,10 @@ import { approval } from "agent-cli-kernel/addons/approval";
 import { diagnosticsAddon } from "agent-cli-kernel/addons/diagnostics";
 import { programsAddon } from "agent-cli-kernel/addons/programs";
 import { stateAddon } from "agent-cli-kernel/addons/state";
+import { cli } from "../src/causes.ts";
 import { commands } from "../src/commands.ts";
 import { testFolder } from "./support/test-folder.ts";
 
-const cli = "agent-doorway";
 const identity = `${cli}.probe` as const;
 const capabilityAddons = ["approval", "diagnostics", "programs"] as const;
 
