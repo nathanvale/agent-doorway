@@ -36,11 +36,38 @@ const defaultEditorTimeoutMilliseconds = 60_000;
 const programOutputLimitBytes = 1_048_576;
 const programShutdownMilliseconds = 1_000;
 
+const pendingCommandStep = {
+  kind: "command",
+  command: "doorway.pending",
+  args: [],
+} as const;
+
 const inspectPending = {
   owner: "operator",
   reason:
     "Inspect doorway pending before deciding how to proceed with this destination.",
-  inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
+  inspect: [pendingCommandStep],
+} as const;
+
+const destinationHeldHandoff = {
+  owner: "operator",
+  reason:
+    "Another doorway process still holds the lock for this destination. Wait for it to finish or stop, then run doorway open again.",
+  inspect: [pendingCommandStep],
+} as const;
+
+const destinationUnresolvedHandoff = {
+  owner: "operator",
+  reason:
+    "An earlier unfinished operation for this destination could not be cleared automatically (for example, a torn journal record, a damaged closure, a different command, or an uncovered scope). Inspect doorway pending before deciding how to proceed.",
+  inspect: [pendingCommandStep],
+} as const;
+
+const openUnconfirmedHandoff = {
+  owner: "operator",
+  reason:
+    "Doorway could not confirm that the isolated editor launcher stopped cleanly. Check doorway pending and any leftover editor launcher; once the earlier run has stopped, running doorway open again clears the unfinished case.",
+  inspect: [pendingCommandStep],
 } as const;
 
 async function foldersExist(paths: readonly string[]): Promise<boolean> {
@@ -68,22 +95,17 @@ type StateRefusal = {
   readonly message: string;
 };
 
-function stateRefusal(
-  outcome: Refusal | { readonly kind: "ran" },
-  destinationName: string,
-): StateRefusal | undefined {
+function stateRefusal(outcome: Refusal, destinationName: string): StateRefusal {
   switch (outcome.kind) {
-    case "ran":
-      return undefined;
     case "held-lock":
       return {
         causeCode: "DOMAIN_DOORWAY_DESTINATION_HELD",
-        message: `Destination ${destinationName} is being changed by operation ${outcome.operationId}.`,
+        message: `Destination ${destinationName} is still held by running operation ${outcome.operationId}. Wait for it to finish or stop, then run doorway open again.`,
       };
     case "unresolved-case":
       return {
         causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
-        message: `Destination ${destinationName} has an unfinished operation ${outcome.operationId}.`,
+        message: `Destination ${destinationName} has an unfinished operation ${outcome.operationId} that doorway open cannot clear automatically (for example, a torn journal record, a damaged closure, a different command, or an uncovered scope).`,
       };
     case "unavailable":
       return {
@@ -99,6 +121,15 @@ function stateRefusal(
         message: `Doorway state refused coordination: ${outcome.kind}.`,
       };
   }
+}
+
+function supersededNote(superseded: readonly string[] | undefined): string {
+  if (superseded === undefined || superseded.length === 0) return "";
+  const label =
+    superseded.length === 1
+      ? "earlier unfinished operation"
+      : "earlier unfinished operations";
+  return ` Cleared ${label}: ${superseded.join(", ")}.`;
 }
 
 function errorMessage(error: unknown): string {
@@ -347,10 +378,10 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_DESTINATION_HELD",
         trigger:
-          "Another doorway process is currently changing this destination.",
+          "Another doorway process still holds the lock for this destination.",
         repairAction:
-          "Wait for the active doorway operation to finish, then try again.",
-        guidance: { handoff: inspectPending },
+          "Wait for the running doorway operation to finish or stop; once the earlier run is gone, running doorway open again clears any unfinished open.",
+        guidance: { handoff: destinationHeldHandoff },
         independentObservable: `${identity}:destination-held`,
       }),
       station(causes, {
@@ -358,10 +389,10 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
         trigger:
-          "An earlier change to this destination did not finish cleanly.",
+          "An earlier unfinished operation for this destination could not be cleared automatically (for example, a torn journal record, a damaged closure, a different command, or an uncovered scope).",
         repairAction:
-          "Inspect unfinished operations with doorway pending before deciding how to proceed.",
-        guidance: { handoff: inspectPending },
+          "Run doorway pending to inspect the unfinished operation. An ordinary killed doorway open clears automatically on the next open once the earlier run is gone; this refusal means the case has a torn journal record, a damaged closure, a different command, or an uncovered scope.",
+        guidance: { handoff: destinationUnresolvedHandoff },
         independentObservable: `${identity}:destination-unresolved`,
       }),
       station(causes, {
@@ -369,9 +400,9 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
         trigger:
-          "The doorway state folder is unavailable, refused coordination, or could not record the operation before starting the isolated editor.",
+          "The doorway state folder is unavailable, refused coordination, sits on a filesystem that cannot clear unfinished cases, or could not record the operation before starting the isolated editor.",
         repairAction:
-          "Inspect the state folder named by DOORWAY_STATE and repair it before running doorway open again.",
+          "Inspect the state folder named by DOORWAY_STATE (including filesystem support and owner lease readability) before running doorway open again.",
         guidance: { handoff: inspectPending },
         independentObservable: `${identity}:state-unavailable`,
       }),
@@ -393,7 +424,7 @@ export function openCommand(
                 kind: "instruction",
                 text: "Check the isolated editor output and run doorway open again.",
               },
-              { kind: "command", command: "doorway.pending", args: [] },
+              pendingCommandStep,
             ],
           },
         },
@@ -406,8 +437,8 @@ export function openCommand(
         trigger:
           "The isolated editor started, and doorway could not confirm that it stopped cleanly.",
         repairAction:
-          "Run doorway pending and check whether the isolated editor process is still running.",
-        guidance: { handoff: inspectPending },
+          "Run doorway pending and check whether the isolated editor launcher is still running. Once the earlier run has stopped, running doorway open again clears this unfinished case and launches the editor again.",
+        guidance: { handoff: openUnconfirmedHandoff },
         independentObservable: `${identity}:open-unconfirmed`,
       }),
     ],
@@ -606,6 +637,7 @@ export function openCommand(
             containerId: destination.containerId,
             place: plan.place,
           },
+          supersedeUnresolved: true,
         },
         async (transaction) => {
           try {
@@ -636,12 +668,15 @@ export function openCommand(
         },
       );
 
-      const refused = stateRefusal(outcome, destination.name);
-      if (refused !== undefined)
+      if (outcome.kind !== "ran") {
+        const refused = stateRefusal(outcome, destination.name);
         return context.result(
           { commandIdentity: identity, causeCode: refused.causeCode },
           { message: refused.message, data: null, effects: nothingChanged },
         );
+      }
+
+      const cleared = supersededNote(outcome.superseded);
 
       if (outcome.proof.transactionState === "unchanged")
         return context.result(
@@ -650,7 +685,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
           },
           {
-            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.`,
+            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.${cleared}`,
             data: null,
             effects: outcome.proof.effects,
           },
@@ -674,7 +709,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
           },
           {
-            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${unconfirmedDetail === "" ? "" : `: ${unconfirmedDetail}`}.`,
+            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${unconfirmedDetail === "" ? "" : `: ${unconfirmedDetail}`}.${cleared}`,
             data: null,
             transaction: outcome.proof,
             attemptedEffect: "editor.open",
@@ -689,7 +724,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_OPEN_FAILED",
           },
           {
-            message: `The isolated editor exited with code ${String(editorResult.exitCode)} for ${destination.name}. No unfinished case remains; you can run doorway open again.`,
+            message: `The isolated editor exited with code ${String(editorResult.exitCode)} for ${destination.name}. No unfinished case remains; you can run doorway open again.${cleared}`,
             data: null,
             transaction: outcome.proof,
             attemptedEffect: "editor.open",
@@ -699,7 +734,7 @@ export function openCommand(
       return context.result(
         { commandIdentity: identity, causeCode: completedSuccess },
         {
-          message: `Opened ${destination.name} at ${plan.place} in the isolated editor. Attachment was not verified; closing the editor leaves the container running.`,
+          message: `Opened ${destination.name} at ${plan.place} in the isolated editor. Attachment was not verified; closing the editor leaves the container running.${cleared}`,
           data: {
             destination: destination.name,
             remoteHost: remoteHost.name,
