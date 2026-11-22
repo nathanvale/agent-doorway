@@ -29,7 +29,7 @@ export function pendingCommand(state: DoorwayState, stateFolder: string) {
         guidance: {
           next: {
             kind: "instruction",
-            text: "Review any unfinished doorway operations before retrying a blocked destination.",
+            text: "An unfinished doorway open clears on the next open for that destination once the earlier run has stopped. A live run still refuses as held; a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.",
           },
         },
         independentObservable: `${identity}:listed`,
@@ -84,10 +84,14 @@ export function pendingCommand(state: DoorwayState, stateFolder: string) {
           },
         );
       }
+      const count = report.unfinished.length;
       return context.result(
         { commandIdentity: identity, causeCode: unchangedSuccess },
         {
-          message: `${String(report.unfinished.length)} unfinished operations.`,
+          message:
+            count === 0
+              ? "0 unfinished operations."
+              : `${String(count)} unfinished ${count === 1 ? "operation" : "operations"}. An unfinished doorway open clears on the next open for that destination once the earlier run has stopped; a live run still refuses as held, and a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.`,
           data: {
             stateFolder,
             unfinished: report.unfinished.map((entry) => ({

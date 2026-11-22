@@ -1,5 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -95,6 +96,7 @@ type FixtureOptions = {
   readonly editorLines?: readonly string[];
   readonly createEditorFolders?: boolean;
   readonly destination?: Partial<DestinationSettings>;
+  readonly destinations?: readonly DestinationSettings[];
   readonly tools?: { readonly editor?: string; readonly ssh?: string };
 };
 
@@ -137,7 +139,9 @@ function createFixture(options: FixtureOptions = {}) {
     version: 1,
     editor: { userDataFolder, extensionsFolder },
     remoteHosts: [sampleHost],
-    destinations: [{ ...sampleDestination, ...options.destination }],
+    destinations: options.destinations ?? [
+      { ...sampleDestination, ...options.destination },
+    ],
     tools: {
       editor: options.tools?.editor ?? fakeEditor,
       ssh: options.tools?.ssh ?? fakeSsh,
@@ -186,6 +190,114 @@ function invokeCli(
 
 function parseJson(text: string): unknown {
   return JSON.parse(text);
+}
+
+function ownProperty(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  return Object.hasOwn(value, key) ? Reflect.get(value, key) : undefined;
+}
+
+function readUnfinishedOperationIds(
+  environment: Record<string, string>,
+): readonly string[] {
+  const pending = invokeCli(environment, "pending", "--json");
+  expect(pending.exitCode).toBe(0);
+  expect(pending.stderr).toBe("");
+  const parsed = parseJson(pending.stdout);
+  const result = ownProperty(parsed, "result");
+  const data = ownProperty(result, "data");
+  const unfinished = ownProperty(data, "unfinished");
+  if (!Array.isArray(unfinished))
+    throw new Error("Expected pending unfinished array.");
+  return unfinished.map((entry: unknown) => {
+    const operationId = ownProperty(entry, "operationId");
+    if (typeof operationId !== "string")
+      throw new Error("Expected unfinished operationId string.");
+    return operationId;
+  });
+}
+
+function installWaitingEditor(
+  editorPath: string,
+  readyFile: string,
+  releaseFile: string,
+): void {
+  rmSync(readyFile, { force: true });
+  rmSync(releaseFile, { force: true });
+  makeScript(editorPath, [
+    'import { existsSync, writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
+    `if (!existsSync(${JSON.stringify(releaseFile)})) {`,
+    "  await new Promise((resolve, reject) => {",
+    "    const interval = setInterval(() => {",
+    `      if (existsSync(${JSON.stringify(releaseFile)})) {`,
+    "        clearInterval(interval);",
+    "        clearTimeout(timer);",
+    "        resolve(undefined);",
+    "      }",
+    "    }, 20);",
+    "    const timer = setTimeout(() => {",
+    "      clearInterval(interval);",
+    '      reject(new Error("Timed out waiting for release file."));',
+    "    }, 15_000);",
+    "  });",
+    "}",
+  ]);
+}
+
+function installLoggingEditor(editorPath: string, editorLog: string): void {
+  rmSync(editorLog, { force: true });
+  makeScript(editorPath, [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(editorLog)}, JSON.stringify({ argv: process.argv.slice(2) }));`,
+  ]);
+}
+
+async function runKilledOpen(
+  fixture: ReturnType<typeof createFixture>,
+  destinationName = "example",
+): Promise<string> {
+  const readyFile = join(fixture.root, "editor-ready");
+  const releaseFile = join(fixture.root, "editor-release");
+  installWaitingEditor(fixture.fakeEditor, readyFile, releaseFile);
+  const beforeIds = new Set(readUnfinishedOperationIds(fixture.environment));
+  const killed = Bun.spawn(
+    [process.execPath, "run", cliEntry, "open", destinationName, "--json"],
+    {
+      env: fixture.environment,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 20_000,
+    },
+  );
+  await waitForFile(readyFile);
+  const editorPid = Number(readFileSync(readyFile, "utf8").trim());
+  killed.kill("SIGKILL");
+  await killed.exited;
+  if (Number.isInteger(editorPid) && editorPid > 0) {
+    try {
+      process.kill(editorPid, "SIGKILL");
+    } catch {
+      void 0;
+    }
+  }
+  const afterIds = readUnfinishedOperationIds(fixture.environment);
+  const added = afterIds.filter((id) => !beforeIds.has(id));
+  expect(added).toHaveLength(1);
+  const createdId = added[0];
+  if (createdId === undefined)
+    throw new Error("Expected a killed open operationId.");
+  return createdId;
+}
+
+function firstFramedRecord(eventsBytes: Buffer): Buffer {
+  const headerEnd = eventsBytes.indexOf(10);
+  if (headerEnd === -1)
+    throw new Error("Expected a framed record header in events.");
+  const bodyEnd = eventsBytes.indexOf(10, headerEnd + 1);
+  if (bodyEnd === -1)
+    throw new Error("Expected a framed record body in events.");
+  return eventsBytes.subarray(0, bodyEnd + 1);
 }
 
 describe("editor arguments", () => {
@@ -922,30 +1034,106 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("refuses a concurrent open with held-lock and blocks after a killed open until inspected with pending", async () => {
+  test("heals a killed earlier open on the next open, launches the editor again, reports superseded, and clears pending", async () => {
+    const fixture = createFixture();
+    try {
+      const killedOperationId = await runKilledOpen(fixture);
+
+      const pendingBefore = invokeCli(fixture.environment, "pending", "--json");
+      expect(pendingBefore.exitCode).toBe(0);
+      expect(pendingBefore.stderr).toBe("");
+      const pendingBeforeEnvelope = parseJson(pendingBefore.stdout);
+      expect(pendingBeforeEnvelope).toMatchObject({
+        result: {
+          commandIdentity: "doorway.pending",
+          causeCode: "SUCCESS_UNCHANGED",
+          data: {
+            unfinished: [
+              {
+                operationId: killedOperationId,
+                commandIdentity: "doorway.open",
+              },
+            ],
+          },
+        },
+      });
+      const pendingMessage = ownProperty(pendingBeforeEnvelope, "message");
+      expect(typeof pendingMessage).toBe("string");
+      expect(String(pendingMessage)).toContain("clears on the next open");
+
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const healed = invokeCli(
+        fixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(healed.exitCode).toBe(0);
+      expect(healed.stderr).toBe("");
+      const healedEnvelope = parseJson(healed.stdout);
+      expect(healedEnvelope).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          outcome: "success",
+          transactionState: "completed",
+          causeCode: "SUCCESS_COMPLETED",
+          superseded: [killedOperationId],
+          data: { destination: "example" },
+        },
+      });
+      expect(String(ownProperty(healedEnvelope, "message"))).toContain(
+        `Cleared earlier unfinished operation: ${killedOperationId}.`,
+      );
+      expect(existsSync(fixture.editorLog)).toBe(true);
+
+      const pendingAfter = invokeCli(fixture.environment, "pending", "--json");
+      expect(pendingAfter.exitCode).toBe(0);
+      expect(parseJson(pendingAfter.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.pending",
+          causeCode: "SUCCESS_UNCHANGED",
+          data: { unfinished: [] },
+        },
+      });
+
+      const cleanOpen = invokeCli(
+        fixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(cleanOpen.exitCode).toBe(0);
+      const cleanEnvelope = parseJson(cleanOpen.stdout);
+      const cleanResult = ownProperty(cleanEnvelope, "result");
+      expect(
+        typeof cleanResult === "object" &&
+          cleanResult !== null &&
+          Object.hasOwn(cleanResult, "superseded"),
+      ).toBe(false);
+      expect(String(ownProperty(cleanEnvelope, "message"))).not.toContain(
+        "Cleared earlier unfinished",
+      );
+
+      const secondKilledId = await runKilledOpen(fixture);
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const healedHuman = invokeCli(fixture.environment, "open", "example");
+      expect(healedHuman.exitCode).toBe(0);
+      expect(healedHuman.stderr).toBe("");
+      expect(healedHuman.stdout).toContain(
+        `Cleared earlier unfinished operation: ${secondKilledId}.`,
+      );
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("refuses a concurrent open with DOMAIN_DOORWAY_DESTINATION_HELD while the earlier open still holds its owner lease and clears nothing", async () => {
     const fixture = createFixture();
     try {
       const readyFile = join(fixture.root, "editor-ready");
       const releaseFile = join(fixture.root, "editor-release");
-      makeScript(fixture.fakeEditor, [
-        'import { existsSync, writeFileSync } from "node:fs";',
-        `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
-        `if (!existsSync(${JSON.stringify(releaseFile)})) {`,
-        "  await new Promise((resolve, reject) => {",
-        "    const interval = setInterval(() => {",
-        `      if (existsSync(${JSON.stringify(releaseFile)})) {`,
-        "        clearInterval(interval);",
-        "        clearTimeout(timer);",
-        "        resolve(undefined);",
-        "      }",
-        "    }, 20);",
-        "    const timer = setTimeout(() => {",
-        "      clearInterval(interval);",
-        '      reject(new Error("Timed out waiting for release file."));',
-        "    }, 15_000);",
-        "  });",
-        "}",
-      ]);
+      installWaitingEditor(fixture.fakeEditor, readyFile, releaseFile);
 
       const first = Bun.spawn(
         [process.execPath, "run", cliEntry, "open", "example", "--json"],
@@ -958,6 +1146,12 @@ describe("doorway open and doorway pending through the real CLI", () => {
       );
       try {
         await waitForFile(readyFile);
+        const liveIds = readUnfinishedOperationIds(fixture.environment);
+        expect(liveIds).toHaveLength(1);
+        const liveOperationId = liveIds[0];
+        if (liveOperationId === undefined)
+          throw new Error("Expected live operationId.");
+
         const held = invokeCli(
           fixture.environment,
           "open",
@@ -965,7 +1159,9 @@ describe("doorway open and doorway pending through the real CLI", () => {
           "--json",
         );
         expect(held.exitCode).toBe(3);
-        expect(parseJson(held.stdout)).toMatchObject({
+        expect(held.stderr).toBe("");
+        const heldEnvelope = parseJson(held.stdout);
+        expect(heldEnvelope).toMatchObject({
           result: {
             commandIdentity: "doorway.open",
             outcome: "refused",
@@ -979,56 +1175,57 @@ describe("doorway open and doorway pending through the real CLI", () => {
             },
           },
         });
+        const heldResult = ownProperty(heldEnvelope, "result");
+        expect(
+          typeof heldResult === "object" &&
+            heldResult !== null &&
+            Object.hasOwn(heldResult, "superseded"),
+        ).toBe(false);
+        expect(
+          existsSync(
+            join(fixture.stateFolder, "operations", liveOperationId, "closure"),
+          ),
+        ).toBe(false);
+        expect(
+          existsSync(join(fixture.stateFolder, "settled", liveOperationId)),
+        ).toBe(false);
       } finally {
         writeFileSync(releaseFile, "go");
         await first.exited;
       }
       expect(first.exitCode).toBe(0);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 
-      rmSync(readyFile, { force: true });
-      rmSync(releaseFile, { force: true });
-
-      const killed = Bun.spawn(
-        [process.execPath, "run", cliEntry, "open", "example", "--json"],
-        {
-          env: fixture.environment,
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 20_000,
-        },
+  test("refuses DOMAIN_DOORWAY_DESTINATION_UNRESOLVED with truthful wording when the earlier open has a torn last journal record", async () => {
+    const fixture = createFixture();
+    try {
+      const killedOperationId = await runKilledOpen(fixture);
+      const eventsPath = join(
+        fixture.stateFolder,
+        "operations",
+        killedOperationId,
+        "events",
       );
-      await waitForFile(readyFile);
-      const editorPid = Number(readFileSync(readyFile, "utf8").trim());
-      killed.kill("SIGKILL");
-      await killed.exited;
-      if (Number.isInteger(editorPid) && editorPid > 0) {
-        try {
-          process.kill(editorPid, "SIGKILL");
-        } catch {
-          void 0;
-        }
-      }
+      const recordBytes = firstFramedRecord(readFileSync(eventsPath));
+      appendFileSync(
+        eventsPath,
+        Buffer.concat([Buffer.from("C3S1 effect-started "), recordBytes]),
+      );
 
-      const pending = invokeCli(fixture.environment, "pending", "--json");
-      expect(pending.exitCode).toBe(0);
-      expect(parseJson(pending.stdout)).toMatchObject({
-        result: {
-          commandIdentity: "doorway.pending",
-          causeCode: "SUCCESS_UNCHANGED",
-          data: {
-            unfinished: [{ commandIdentity: "doorway.open" }],
-          },
-        },
-      });
-
-      const blocked = invokeCli(
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const refused = invokeCli(
         fixture.environment,
         "open",
         "example",
         "--json",
       );
-      expect(blocked.exitCode).toBe(3);
-      expect(parseJson(blocked.stdout)).toMatchObject({
+      expect(refused.exitCode).toBe(3);
+      expect(refused.stderr).toBe("");
+      const refusedEnvelope = parseJson(refused.stdout);
+      expect(refusedEnvelope).toMatchObject({
         result: {
           commandIdentity: "doorway.open",
           outcome: "refused",
@@ -1042,6 +1239,91 @@ describe("doorway open and doorway pending through the real CLI", () => {
           },
         },
       });
+      const refusedMessage = String(ownProperty(refusedEnvelope, "message"));
+      expect(refusedMessage).toContain(killedOperationId);
+      expect(refusedMessage).toContain("cannot clear automatically");
+      expect(refusedMessage).toContain("torn journal record");
+      const refusedResult = ownProperty(refusedEnvelope, "result");
+      const repairAction = String(ownProperty(refusedResult, "repairAction"));
+      expect(repairAction).toContain("clears automatically");
+      expect(repairAction).toContain("torn journal record");
+      expect(existsSync(fixture.editorLog)).toBe(false);
+      expect(
+        existsSync(
+          join(fixture.stateFolder, "operations", killedOperationId, "closure"),
+        ),
+      ).toBe(false);
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([
+        killedOperationId,
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("leaves an unresolved open for another destination untouched when opening this destination", async () => {
+    const secondDestination: DestinationSettings = {
+      ...sampleDestination,
+      name: "second",
+      label: "Second container",
+      container: "second-box",
+      containerId: otherContainerId,
+    };
+    const fixture = createFixture({
+      destinations: [sampleDestination, secondDestination],
+      sshLines: [
+        `process.stdout.write(${JSON.stringify(
+          `${sampleContainerId} example-box running\n${otherContainerId} second-box running\n`,
+        )});`,
+      ],
+    });
+    try {
+      const exampleOperationId = await runKilledOpen(fixture, "example");
+
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const openedOther = invokeCli(
+        fixture.environment,
+        "open",
+        "second",
+        "--json",
+      );
+      expect(openedOther.exitCode).toBe(0);
+      expect(openedOther.stderr).toBe("");
+      const otherEnvelope = parseJson(openedOther.stdout);
+      expect(otherEnvelope).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          outcome: "success",
+          transactionState: "completed",
+          causeCode: "SUCCESS_COMPLETED",
+          data: {
+            destination: "second",
+            container: "second-box",
+            containerId: otherContainerId,
+          },
+        },
+      });
+      const otherResult = ownProperty(otherEnvelope, "result");
+      expect(
+        typeof otherResult === "object" &&
+          otherResult !== null &&
+          Object.hasOwn(otherResult, "superseded"),
+      ).toBe(false);
+      expect(existsSync(fixture.editorLog)).toBe(true);
+
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([
+        exampleOperationId,
+      ]);
+      expect(
+        existsSync(
+          join(
+            fixture.stateFolder,
+            "operations",
+            exampleOperationId,
+            "closure",
+          ),
+        ),
+      ).toBe(false);
     } finally {
       fixture.cleanup();
     }
@@ -1120,7 +1402,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case for pending", async () => {
+  test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears", async () => {
     const fixture = createFixture();
     try {
       const sigtermFile = join(fixture.root, "editor-sigterm");
@@ -1166,33 +1448,32 @@ describe("doorway open and doorway pending through the real CLI", () => {
         },
       });
 
-      const pending = invokeCli(fixture.environment, "pending", "--json");
-      expect(pending.exitCode).toBe(0);
-      expect(parseJson(pending.stdout)).toMatchObject({
-        result: {
-          commandIdentity: "doorway.pending",
-          causeCode: "SUCCESS_UNCHANGED",
-          data: {
-            unfinished: [{ commandIdentity: "doorway.open" }],
-          },
-        },
-      });
+      const timedOutIds = readUnfinishedOperationIds(fixture.environment);
+      expect(timedOutIds).toHaveLength(1);
+      const timedOutId = timedOutIds[0];
+      if (timedOutId === undefined)
+        throw new Error("Expected timed out operationId.");
 
-      const blocked = invokeCli(
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const healed = invokeCli(
         fixture.environment,
         "open",
         "example",
         "--json",
       );
-      expect(blocked.exitCode).toBe(3);
-      expect(parseJson(blocked.stdout)).toMatchObject({
+      expect(healed.exitCode).toBe(0);
+      expect(healed.stderr).toBe("");
+      expect(parseJson(healed.stdout)).toMatchObject({
         result: {
           commandIdentity: "doorway.open",
-          outcome: "refused",
-          transactionState: "unchanged",
-          causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
+          outcome: "success",
+          transactionState: "completed",
+          causeCode: "SUCCESS_COMPLETED",
+          superseded: [timedOutId],
         },
       });
+      expect(existsSync(fixture.editorLog)).toBe(true);
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
     } finally {
       fixture.cleanup();
     }
