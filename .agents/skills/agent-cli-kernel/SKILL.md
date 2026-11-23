@@ -22,4 +22,4 @@ one `package.json` pins, or when the installed kernel does not hold the full
 skill.
 
 Full skill: `node_modules/agent-cli-kernel/skills/agent-cli-kernel/SKILL.md`
-Pinned commit: `9904673c024659964e9a635eb6801247fe5e3bb3`
+Pinned commit: `1f871cfd3234cb2ed601a1aaaeb079b7d6cdfc58`

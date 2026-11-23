@@ -172,21 +172,85 @@ function createFixture(options: FixtureOptions = {}) {
   };
 }
 
-function invokeCli(
+function spawnCli(
+  runtimeArgs: readonly string[],
   environment: Record<string, string>,
-  ...argv: readonly string[]
+  argv: readonly string[],
 ) {
-  const ran = Bun.spawnSync([process.execPath, "run", cliEntry, ...argv], {
-    env: environment,
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 20_000,
-  });
+  const ran = Bun.spawnSync(
+    [process.execPath, ...runtimeArgs, cliEntry, ...argv],
+    {
+      env: environment,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 20_000,
+    },
+  );
   return {
     exitCode: ran.exitCode,
     stdout: ran.stdout.toString(),
     stderr: ran.stderr.toString(),
   };
+}
+
+function invokeCli(
+  environment: Record<string, string>,
+  ...argv: readonly string[]
+) {
+  return spawnCli(["run"], environment, argv);
+}
+
+const journalFaultPreload = [
+  'import { mock } from "bun:test";',
+  'import * as fs from "node:fs";',
+  "const real = { ...fs };",
+  "const faults = new Set((process.env.DOORWAY_TEST_JOURNAL_FAULTS ?? '').split(',').filter(Boolean));",
+  "const eventsDescriptors = new Set();",
+  "const unflushable = new Set();",
+  "const planted = (call) => Object.assign(new Error(`EIO: planted journal fault, ${call}`), { code: 'EIO' });",
+  "mock.module('node:fs', () => ({",
+  "  ...real,",
+  "  openSync: (path, flags, mode) => {",
+  "    const descriptor = real.openSync(path, flags, mode);",
+  "    if (String(path).endsWith('/events') && typeof flags === 'number' && (flags & real.constants.O_APPEND) !== 0) eventsDescriptors.add(descriptor);",
+  "    return descriptor;",
+  "  },",
+  "  closeSync: (descriptor) => {",
+  "    eventsDescriptors.delete(descriptor);",
+  "    unflushable.delete(descriptor);",
+  "    return real.closeSync(descriptor);",
+  "  },",
+  "  writeSync: (descriptor, bytes, ...rest) => {",
+  "    if (eventsDescriptors.has(descriptor) && (rest[0] ?? 0) === 0) {",
+  "      const kind = Buffer.from(bytes).subarray(0, 64).toString('latin1').split(' ')[1];",
+  "      if (faults.has(`${kind}:write`)) throw planted(`${kind} write`);",
+  "      if (faults.has(`${kind}:flush`)) unflushable.add(descriptor);",
+  "    }",
+  "    return real.writeSync(descriptor, bytes, ...rest);",
+  "  },",
+  "  fsyncSync: (descriptor) => {",
+  "    if (unflushable.delete(descriptor)) throw planted('flush');",
+  "    return real.fsyncSync(descriptor);",
+  "  },",
+  "  linkSync: (from, to) => {",
+  "    if (faults.has('closure:link') && String(to).endsWith('/closure')) throw planted('closure link');",
+  "    return real.linkSync(from, to);",
+  "  },",
+  "}));",
+];
+
+function invokeCliWithJournalFaults(
+  fixture: ReturnType<typeof createFixture>,
+  faults: string,
+  ...argv: readonly string[]
+) {
+  const preload = join(fixture.root, "journal-faults.ts");
+  writeFileSync(preload, [...journalFaultPreload, ""].join("\n"));
+  return spawnCli(
+    ["run", "--preload", preload],
+    { ...fixture.environment, DOORWAY_TEST_JOURNAL_FAULTS: faults },
+    argv,
+  );
 }
 
 function parseJson(text: string): unknown {
@@ -1552,7 +1616,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("refuses with a declared state station when the state journal cannot append effect-started before starting the editor", async () => {
+  test("reports an unconfirmed open that doorway pending lists, without starting the editor, when the state journal cannot append effect-started or the completion", async () => {
     const fixture = createFixture();
     let eventsFile: string | undefined;
     try {
@@ -1600,22 +1664,37 @@ describe("doorway open and doorway pending through the real CLI", () => {
       expect(ran.exitCode).toBe(3);
       expect(ran.envelope.result).toMatchObject({
         commandIdentity: "doorway.open",
-        outcome: "refused",
-        transactionState: "unchanged",
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+        attemptedEffect: "editor.open",
         data: null,
         effects: {
           completed: [],
           remaining: ["editor.open"],
           uncertain: [],
-          inventoryComplete: true,
+          inventoryComplete: false,
         },
         handoff: {
           owner: "operator",
           inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
         },
       });
+      expect(ran.envelope.message).toContain(
+        "The isolated editor did not start for example",
+      );
       expect(existsSync(fixture.editorLog)).toBe(false);
+
+      const pending = await runInProcess(contract, {
+        emergencyRecord: realState.emergencyRecord,
+        addons: { programs: programsAddon() },
+      })(["pending", "--json"]);
+      expect(pending.kind).toBe("envelope");
+      if (pending.kind !== "envelope") return;
+      expect(pending.envelope.result).toMatchObject({
+        commandIdentity: "doorway.pending",
+        data: { unfinished: [{ commandIdentity: "doorway.open" }] },
+      });
     } finally {
       if (eventsFile !== undefined && existsSync(eventsFile)) {
         chmodSync(eventsFile, 0o600);
@@ -1864,9 +1943,9 @@ describe("doorway open and doorway pending through the real CLI", () => {
       expect(ran.exitCode).toBe(3);
       expect(ran.envelope.result).toMatchObject({
         commandIdentity: "doorway.open",
-        outcome: "refused",
-        transactionState: "unchanged",
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
         superseded: [killedOperationId],
         data: null,
         handoff: {
@@ -1883,6 +1962,172 @@ describe("doorway open and doorway pending through the real CLI", () => {
       if (eventsFile !== undefined && existsSync(eventsFile)) {
         chmodSync(eventsFile, 0o600);
       }
+      fixture.cleanup();
+    }
+  });
+
+  const editorKillsItself = ['process.kill(process.pid, "SIGKILL");'];
+  const notStarted = "The isolated editor did not start for example";
+  const stopUnconfirmed =
+    "Could not confirm that the isolated editor stopped cleanly for example";
+  const startedAndStopped =
+    "The isolated editor started and stopped for example with exit code 0.";
+  const unknownProofCases = [
+    {
+      name: "ran, effect-started and not-applied writes fail",
+      faults: "effect-started:write,not-applied:write",
+      placement: "remaining",
+      message: notStarted,
+      inventoryComplete: false,
+      editorRan: false,
+      unfinishedAfter: 1,
+    },
+    {
+      name: "ran, effect-started write fails and the not-applied flush fails",
+      faults: "effect-started:write,not-applied:flush",
+      placement: "remaining",
+      message: notStarted,
+      inventoryComplete: false,
+      editorRan: false,
+      unfinishedAfter: 0,
+    },
+    {
+      name: "ran, the editor stop is not confirmed",
+      faults: "",
+      editorLines: editorKillsItself,
+      placement: "uncertain",
+      message: stopUnconfirmed,
+      inventoryComplete: true,
+      editorRan: false,
+      unfinishedAfter: 1,
+    },
+    {
+      name: "ran, the editor stopped and the completion write fails",
+      faults: "completion:write",
+      placement: "completed",
+      message: startedAndStopped,
+      inventoryComplete: false,
+      editorRan: true,
+      unfinishedAfter: 1,
+    },
+    {
+      name: "ran, the editor stopped and the completion flush fails",
+      faults: "completion:flush",
+      placement: "completed",
+      message: startedAndStopped,
+      inventoryComplete: false,
+      editorRan: true,
+      unfinishedAfter: 0,
+    },
+    {
+      name: "refused, the closure link and the not-applied write fail after a killed open",
+      faults: "closure:link,not-applied:write",
+      seedKilledOpen: true,
+      placement: "remaining",
+      message: notStarted,
+      inventoryComplete: false,
+      editorRan: false,
+      unfinishedAfter: 2,
+    },
+  ] as const;
+
+  test.each(unknownProofCases)(
+    "answers every unknown proof with DOMAIN_DOORWAY_OPEN_UNCONFIRMED, its proof and a message that matches where editor.open sits: $name",
+    async (row) => {
+      const fixture = createFixture(
+        "editorLines" in row ? { editorLines: row.editorLines } : {},
+      );
+      try {
+        if ("seedKilledOpen" in row) {
+          await runKilledOpen(fixture);
+          installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+        }
+        const ran = invokeCliWithJournalFaults(
+          fixture,
+          row.faults,
+          "open",
+          "example",
+          "--json",
+        );
+        const envelope = parseJson(ran.stdout);
+        expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+          exitCode: 3,
+          stderr: "",
+        });
+        expect(ownProperty(envelope, "result")).toMatchObject({
+          commandIdentity: "doorway.open",
+          outcome: "failed",
+          transactionState: "unknown",
+          causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+          attemptedEffect: "editor.open",
+          effects: {
+            completed: row.placement === "completed" ? ["editor.open"] : [],
+            remaining: row.placement === "remaining" ? ["editor.open"] : [],
+            uncertain: row.placement === "uncertain" ? ["editor.open"] : [],
+            inventoryComplete: row.inventoryComplete,
+          },
+          handoff: {
+            inspect: [
+              { kind: "command", command: "doorway.pending", args: [] },
+            ],
+          },
+        });
+        const message = String(ownProperty(envelope, "message"));
+        expect(message).toContain(row.message);
+        expect(message).not.toContain("lists it");
+        expect(message.includes("Run doorway pending to check")).toBe(
+          !row.inventoryComplete,
+        );
+        expect(existsSync(fixture.editorLog)).toBe(row.editorRan);
+        const unfinished = readUnfinishedOperationIds(fixture.environment);
+        expect(unfinished).toHaveLength(row.unfinishedAfter);
+
+        installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+        const reopened = invokeCli(fixture.environment, "open", "example");
+        expect(reopened.exitCode).toBe(0);
+        expect(reopened.stdout).toContain(
+          unfinished.length === 0 ? "Opened example" : "Cleared earlier",
+        );
+        expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+  );
+
+  test("keeps the refused and unchanged state station when only the effect-started write fails and the not-applied record lands", () => {
+    const fixture = createFixture();
+    try {
+      const ran = invokeCliWithJournalFaults(
+        fixture,
+        "effect-started:write",
+        "open",
+        "example",
+        "--json",
+      );
+      expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+        exitCode: 3,
+        stderr: "",
+      });
+      const envelope = parseJson(ran.stdout);
+      expect(ownProperty(envelope, "result")).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "refused",
+        transactionState: "unchanged",
+        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        effects: {
+          completed: [],
+          remaining: ["editor.open"],
+          uncertain: [],
+          inventoryComplete: true,
+        },
+      });
+      expect(String(ownProperty(envelope, "message"))).toContain(
+        "Doorway state could not record example before starting the isolated editor: EIO: planted journal fault, effect-started write.",
+      );
+      expect(existsSync(fixture.editorLog)).toBe(false);
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+    } finally {
       fixture.cleanup();
     }
   });

@@ -68,7 +68,7 @@ const destinationUnresolvedHandoff = {
 const openUnconfirmedHandoff = {
   owner: "operator",
   reason:
-    "Doorway could not confirm that the isolated editor launcher stopped cleanly. Check doorway pending and any leftover editor launcher; once the earlier run has stopped, running doorway open again clears the unfinished case.",
+    "Doorway could not confirm how the open ended. Check doorway pending and any leftover editor launcher; once the earlier run has stopped and the state folder accepts writes, running doorway open again clears an unfinished open.",
   inspect: [pendingCommandStep],
 } as const;
 
@@ -154,6 +154,54 @@ function refusedSupersededNote(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+type UnknownOpen = {
+  readonly name: string;
+  readonly effects: {
+    readonly completed: readonly string[];
+    readonly uncertain: readonly string[];
+    readonly inventoryComplete: boolean;
+  };
+  readonly refusal: Refusal | undefined;
+  readonly failureDetail: string;
+  readonly editorResult: ProgramResult | undefined;
+};
+
+function refusalDetail(refusal: Refusal): string {
+  const about =
+    refusal.kind === "unavailable"
+      ? `, ${refusal.reason}`
+      : refusal.kind === "held-lock" || refusal.kind === "unresolved-case"
+        ? `, ${refusal.operationId}`
+        : "";
+  return `doorway state refused the open (${refusal.kind}${about})`;
+}
+
+function unknownDetail(open: UnknownOpen): string {
+  if (open.refusal !== undefined) return refusalDetail(open.refusal);
+  if (open.failureDetail !== "") return open.failureDetail;
+  return open.editorResult !== undefined &&
+    programDetails(open.editorResult)?.timedOut === true
+    ? "the editor launcher timed out"
+    : "";
+}
+
+function editorSentence(open: UnknownOpen): string {
+  const detail = unknownDetail(open);
+  const because = detail === "" ? "" : `: ${detail}`;
+  if (open.effects.completed.includes("editor.open"))
+    return `The isolated editor started and stopped for ${open.name} with exit code ${String(open.editorResult?.exitCode)}.`;
+  if (open.effects.uncertain.includes("editor.open"))
+    return `Could not confirm that the isolated editor stopped cleanly for ${open.name}${because}.`;
+  return `The isolated editor did not start for ${open.name}${because}.`;
+}
+
+function unconfirmedMessage(open: UnknownOpen): string {
+  const journal = open.effects.inventoryComplete
+    ? ""
+    : " Doorway state could not confirm its final journal record for this open, so the open may still be unfinished. Run doorway pending to check; once the state folder accepts writes, doorway open clears an unfinished open of this destination.";
+  return `${editorSentence(open)}${journal}`;
 }
 
 function editorStoppedCleanly(result: ProgramResult): boolean {
@@ -456,9 +504,9 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
         trigger:
-          "The isolated editor started, and doorway could not confirm that it stopped cleanly.",
+          "Doorway could not confirm how the open ended: the isolated editor stop was not confirmed, or doorway state could not confirm a journal record for the open before or after the editor ran.",
         repairAction:
-          "Run doorway pending and check whether the isolated editor launcher is still running. Once the earlier run has stopped, running doorway open again clears this unfinished case and launches the editor again.",
+          "Run doorway pending to see whether this open is still unfinished, and check whether an isolated editor launcher is still running. Once no earlier run is running and the state folder accepts writes, run doorway open again; it clears an unfinished open of this destination and launches the editor again.",
         guidance: { handoff: openUnconfirmedHandoff },
         independentObservable: `${identity}:open-unconfirmed`,
       }),
@@ -698,6 +746,28 @@ export function openCommand(
         },
       );
 
+      const cleared = supersededNote(outcome.superseded);
+      const unconfirmed = () =>
+        context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+          },
+          {
+            message: `${unconfirmedMessage({
+              name: destination.name,
+              effects: outcome.proof.effects,
+              refusal: outcome.kind === "ran" ? undefined : outcome,
+              failureDetail,
+              editorResult,
+            })}${cleared}`,
+            data: null,
+            transaction: outcome.proof,
+            attemptedEffect: "editor.open",
+          },
+        );
+      if (outcome.proof.transactionState === "unknown") return unconfirmed();
+
       const clearedOnRefusal = refusedSupersededNote(outcome.superseded);
       if (outcome.kind !== "ran") {
         const refused = stateRefusal(outcome, destination.name);
@@ -714,8 +784,6 @@ export function openCommand(
         );
       }
 
-      const cleared = supersededNote(outcome.superseded);
-
       if (outcome.proof.transactionState === "unchanged")
         return context.result(
           {
@@ -731,29 +799,9 @@ export function openCommand(
 
       if (
         outcome.proof.transactionState !== "completed" ||
-        editorResult === undefined ||
-        !editorStoppedCleanly(editorResult)
-      ) {
-        const unconfirmedDetail =
-          failureDetail !== ""
-            ? failureDetail
-            : editorResult !== undefined &&
-                programDetails(editorResult)?.timedOut === true
-              ? "the editor launcher timed out"
-              : "";
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
-          },
-          {
-            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${unconfirmedDetail === "" ? "" : `: ${unconfirmedDetail}`}.${cleared}`,
-            data: null,
-            transaction: outcome.proof,
-            attemptedEffect: "editor.open",
-          },
-        );
-      }
+        editorResult === undefined
+      )
+        return unconfirmed();
 
       if (editorResult.exitCode !== 0)
         return context.result(
