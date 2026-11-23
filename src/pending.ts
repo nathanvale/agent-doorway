@@ -7,12 +7,18 @@ import {
   stationWords,
   unchangedSuccess,
 } from "./causes.ts";
+import { oldStateMessage } from "./settings.ts";
+import type { Environment } from "./settings.ts";
 
 export type DoorwayState = ReturnType<typeof stateAddon>;
 
 const identity = "doorway.pending";
 
-export function pendingCommand(state: DoorwayState, stateFolder: string) {
+export function pendingCommand(
+  state: DoorwayState,
+  stateFolder: string,
+  environment: Environment,
+) {
   return command({
     identity,
     route: ["pending"],
@@ -38,17 +44,19 @@ export function pendingCommand(state: DoorwayState, stateFolder: string) {
         ...stationWords,
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-        trigger: "The doorway state folder is unreadable or corrupt.",
+        trigger:
+          "The doorway state folder is unreadable or corrupt, or is left at the old default place outside my-agent-dojo.",
         repairAction:
-          "Inspect the state folder named in the message and repair or move it aside before running doorway again.",
+          "When the message names an old state folder, run the move command it gives; doorway never reads or moves the old folder itself. Otherwise inspect the state folder named in the message and repair or move it aside before running doorway again.",
         guidance: {
           handoff: {
             owner: "operator",
-            reason: "The doorway state folder cannot be read.",
+            reason:
+              "The doorway state folder cannot be read, or is left at its old default place.",
             inspect: [
               {
                 kind: "instruction",
-                text: "Inspect the doorway state folder named in the message.",
+                text: "Inspect the doorway state folder named in the message, or run the move command the message gives.",
               },
             ],
           },
@@ -57,6 +65,19 @@ export function pendingCommand(state: DoorwayState, stateFolder: string) {
       }),
     ],
     run: (_input, context) => {
+      const stateAtOldPlace = oldStateMessage(environment);
+      if (stateAtOldPlace !== undefined)
+        return context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          },
+          {
+            message: stateAtOldPlace,
+            data: null,
+            effects: nothingChanged,
+          },
+        );
       const report = state.report();
       if (!report.ok && report.reason === "missing") {
         return context.result(

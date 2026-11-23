@@ -47,7 +47,7 @@ function validSettings(folder: string) {
 }
 
 describe("settings and state paths", () => {
-  test("DOORWAY_SETTINGS overrides the default settings path", () => {
+  test("DOORWAY_SETTINGS overrides the default settings path inside my-agent-dojo", () => {
     const folder = testFolder("settings-path-");
     try {
       const override = join(folder, "custom.json");
@@ -63,16 +63,19 @@ describe("settings and state paths", () => {
           XDG_CONFIG_HOME: join(folder, "xdg"),
           HOME: folder,
         }),
-      ).toBe(join(folder, "xdg", "doorway", "settings.json"));
+      ).toBe(join(folder, "xdg", "my-agent-dojo", "doorway", "settings.json"));
+      expect(settingsPath({ HOME: folder, XDG_CONFIG_HOME: "" })).toBe(
+        join(folder, ".config", "my-agent-dojo", "doorway", "settings.json"),
+      );
       expect(settingsPath({ HOME: folder })).toBe(
-        join(folder, ".config", "doorway", "settings.json"),
+        join(folder, ".config", "my-agent-dojo", "doorway", "settings.json"),
       );
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
   });
 
-  test("DOORWAY_STATE overrides the default state folder", () => {
+  test("DOORWAY_STATE overrides the default state folder inside my-agent-dojo", () => {
     const folder = testFolder("state-path-");
     try {
       const override = join(folder, "custom-state");
@@ -88,9 +91,12 @@ describe("settings and state paths", () => {
           XDG_STATE_HOME: join(folder, "xdg-state"),
           HOME: folder,
         }),
-      ).toBe(join(folder, "xdg-state", "doorway"));
+      ).toBe(join(folder, "xdg-state", "my-agent-dojo", "doorway"));
+      expect(statePath({ HOME: folder, XDG_STATE_HOME: "" })).toBe(
+        join(folder, ".local", "state", "my-agent-dojo", "doorway"),
+      );
       expect(statePath({ HOME: folder })).toBe(
-        join(folder, ".local", "state", "doorway"),
+        join(folder, ".local", "state", "my-agent-dojo", "doorway"),
       );
     } finally {
       rmSync(folder, { recursive: true, force: true });

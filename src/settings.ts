@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -99,25 +100,83 @@ export function expandHome(pathValue: string, home: string): string {
     : pathValue;
 }
 
+const dojoDoorway = ["my-agent-dojo", "doorway"] as const;
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === "" ? undefined : value;
+}
+
+function configBase(environment: Environment): string {
+  return (
+    nonEmpty(environment.XDG_CONFIG_HOME) ??
+    join(homeOf(environment), ".config")
+  );
+}
+
+function stateBase(environment: Environment): string {
+  return (
+    nonEmpty(environment.XDG_STATE_HOME) ??
+    join(homeOf(environment), ".local", "state")
+  );
+}
+
+function overrideOf(
+  environment: Environment,
+  name: "DOORWAY_SETTINGS" | "DOORWAY_STATE",
+): string | undefined {
+  const value = nonEmpty(environment[name]);
+  return value === undefined
+    ? undefined
+    : expandHome(value, homeOf(environment));
+}
+
 export function settingsPath(environment: Environment): string {
-  const home = homeOf(environment);
-  const explicit = environment.DOORWAY_SETTINGS;
-  if (explicit !== undefined && explicit !== "")
-    return expandHome(explicit, home);
-  const xdg = environment.XDG_CONFIG_HOME;
-  const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
-  return join(base, "doorway", "settings.json");
+  return (
+    overrideOf(environment, "DOORWAY_SETTINGS") ??
+    join(configBase(environment), ...dojoDoorway, "settings.json")
+  );
 }
 
 export function statePath(environment: Environment): string {
-  const home = homeOf(environment);
-  const explicit = environment.DOORWAY_STATE;
-  if (explicit !== undefined && explicit !== "")
-    return expandHome(explicit, home);
-  const xdg = environment.XDG_STATE_HOME;
-  const base =
-    xdg !== undefined && xdg !== "" ? xdg : join(home, ".local", "state");
-  return join(base, "doorway");
+  return (
+    overrideOf(environment, "DOORWAY_STATE") ??
+    join(stateBase(environment), ...dojoDoorway)
+  );
+}
+
+function singleQuoted(pathValue: string): string {
+  return `'${pathValue.replaceAll("'", "'\\''")}'`;
+}
+
+function oldPlaceMessage(
+  subject: "settings file" | "state folder",
+  oldPath: string,
+  newPath: string,
+): string | undefined {
+  if (existsSync(newPath) || !existsSync(oldPath)) return undefined;
+  const move = `mkdir -p ${singleQuoted(dirname(newPath))} && mv ${singleQuoted(oldPath)} ${singleQuoted(newPath)}`;
+  return `The doorway ${subject} is at its old place ${oldPath}. Doorway now uses ${newPath} and does not read or move the old one. Move it, then run doorway again: ${move}`;
+}
+
+export function oldSettingsMessage(
+  environment: Environment,
+): string | undefined {
+  if (overrideOf(environment, "DOORWAY_SETTINGS") !== undefined)
+    return undefined;
+  return oldPlaceMessage(
+    "settings file",
+    join(configBase(environment), "doorway", "settings.json"),
+    settingsPath(environment),
+  );
+}
+
+export function oldStateMessage(environment: Environment): string | undefined {
+  if (overrideOf(environment, "DOORWAY_STATE") !== undefined) return undefined;
+  return oldPlaceMessage(
+    "state folder",
+    join(stateBase(environment), "doorway"),
+    statePath(environment),
+  );
 }
 
 export function toolPath(
