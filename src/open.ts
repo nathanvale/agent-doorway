@@ -464,6 +464,15 @@ export function openCommand(
       }),
     ],
     run: async (input, context) => {
+      const stateAtOldPlace = oldStateMessage(environment);
+      if (stateAtOldPlace !== undefined)
+        return context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          },
+          { message: stateAtOldPlace, data: null, effects: nothingChanged },
+        );
       const settingsFile = settingsPath(environment);
       const loaded = await loadSettings(settingsFile);
       if (loaded.kind === "missing")
@@ -489,15 +498,6 @@ export function openCommand(
             data: null,
             effects: nothingChanged,
           },
-        );
-      const stateAtOldPlace = oldStateMessage(environment);
-      if (stateAtOldPlace !== undefined)
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-          },
-          { message: stateAtOldPlace, data: null, effects: nothingChanged },
         );
       const found = findDestination(loaded.settings, input.destination);
       if (found === undefined)

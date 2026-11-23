@@ -1913,6 +1913,7 @@ function runShell(commandLine: string): number {
   return Bun.spawnSync(["/bin/sh", "-c", commandLine], {
     stdout: "pipe",
     stderr: "pipe",
+    timeout: 10_000,
   }).exitCode;
 }
 
@@ -2199,6 +2200,67 @@ describe("default doorway folders inside my-agent-dojo", () => {
     } finally {
       both.cleanup();
       neither.cleanup();
+    }
+  });
+
+  test("open refuses a state folder left at the old place before it checks settings, whether settings are missing or invalid, and creates nothing", () => {
+    const fixture = createFixture();
+    try {
+      const stateBase = join(fixture.root, ".local", "state");
+      const oldState = join(stateBase, "doorway");
+      const newParent = join(stateBase, "my-agent-dojo");
+      const newState = join(newParent, "doorway");
+      const newSettingsFolder = join(
+        fixture.root,
+        ".config",
+        "my-agent-dojo",
+        "doorway",
+      );
+      mkdirSync(oldState, { recursive: true, mode: 0o700 });
+      const environment = withoutVariables(
+        fixture.environment,
+        "DOORWAY_SETTINGS",
+        "DOORWAY_STATE",
+      );
+      const moveCommand = expectedMoveCommand(oldState, newParent, newState);
+
+      const noSettings = invokeCli(environment, "open", "example", "--json");
+      expect(noSettings.exitCode).toBe(3);
+      expect(parseJson(noSettings.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      expect(messageOf(noSettings.stdout)).toContain(moveCommand);
+      expect(existsSync(newParent)).toBe(false);
+      expect(existsSync(newSettingsFolder)).toBe(false);
+
+      mkdirSync(newSettingsFolder, { recursive: true });
+      writeFileSync(join(newSettingsFolder, "settings.json"), "{broken");
+      const invalidSettings = invokeCli(
+        environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(invalidSettings.exitCode).toBe(3);
+      expect(parseJson(invalidSettings.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      expect(messageOf(invalidSettings.stdout)).toContain(moveCommand);
+      expect(existsSync(newParent)).toBe(false);
+      expect(existsSync(fixture.sshLog)).toBe(false);
+      expect(existsSync(fixture.editorLog)).toBe(false);
+    } finally {
+      fixture.cleanup();
     }
   });
 });
