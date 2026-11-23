@@ -2094,6 +2094,43 @@ describe("doorway open and doorway pending through the real CLI", () => {
       }
     },
   );
+
+  test("keeps the refused and unchanged state station when only the effect-started write fails and the not-applied record lands", () => {
+    const fixture = createFixture();
+    try {
+      const ran = invokeCliWithJournalFaults(
+        fixture,
+        "effect-started:write",
+        "open",
+        "example",
+        "--json",
+      );
+      expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+        exitCode: 3,
+        stderr: "",
+      });
+      const envelope = parseJson(ran.stdout);
+      expect(ownProperty(envelope, "result")).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "refused",
+        transactionState: "unchanged",
+        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        effects: {
+          completed: [],
+          remaining: ["editor.open"],
+          uncertain: [],
+          inventoryComplete: true,
+        },
+      });
+      expect(String(ownProperty(envelope, "message"))).toContain(
+        "Doorway state could not record example before starting the isolated editor: EIO: planted journal fault, effect-started write.",
+      );
+      expect(existsSync(fixture.editorLog)).toBe(false);
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
 
 function withoutVariables(
