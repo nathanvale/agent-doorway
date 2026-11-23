@@ -25,6 +25,8 @@ import {
   homeOf,
   isSafeRemotePath,
   loadSettings,
+  oldSettingsMessage,
+  oldStateMessage,
   settingsPath,
   toolPath,
 } from "./settings.ts";
@@ -123,6 +125,16 @@ function stateRefusal(outcome: Refusal, destinationName: string): StateRefusal {
   }
 }
 
+function settingsMissingMessage(
+  environment: Environment,
+  settingsFile: string,
+): string {
+  return (
+    oldSettingsMessage(environment) ??
+    `Settings file not found at ${settingsFile}.`
+  );
+}
+
 function supersededNote(superseded: readonly string[] | undefined): string {
   if (superseded === undefined || superseded.length === 0) return "";
   const label =
@@ -215,13 +227,14 @@ export function openCommand(
         ...stationWords,
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-        trigger: "The doorway settings file does not exist.",
+        trigger:
+          "The doorway settings file does not exist, or a settings file is left only at the old default place outside my-agent-dojo.",
         repairAction:
-          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file.",
+          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file. When the message names an old settings file, run the move command it gives; doorway never reads or moves the old file itself.",
         guidance: {
           next: {
             kind: "instruction",
-            text: "Create the settings file or set DOORWAY_SETTINGS, then run doorway open again.",
+            text: "Create the settings file, set DOORWAY_SETTINGS, or run the move command in the message, then run doorway open again.",
           },
         },
         independentObservable: `${identity}:settings-missing`,
@@ -408,9 +421,9 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
         trigger:
-          "The doorway state folder is unavailable, refused coordination, sits on a filesystem that cannot clear unfinished cases, or could not record the operation before starting the isolated editor.",
+          "The doorway state folder is unavailable, is left at the old default place outside my-agent-dojo, refused coordination, sits on a filesystem that cannot clear unfinished cases, or could not record the operation before starting the isolated editor.",
         repairAction:
-          "Inspect the state folder named by DOORWAY_STATE (including filesystem support and owner lease readability) before running doorway open again.",
+          "When the message names an old state folder, run the move command it gives; doorway never reads or moves the old folder itself. Otherwise inspect the state folder (DOORWAY_STATE, or the default place inside my-agent-dojo), including filesystem support and owner lease readability, before running doorway open again.",
         guidance: { handoff: inspectPending },
         independentObservable: `${identity}:state-unavailable`,
       }),
@@ -451,6 +464,15 @@ export function openCommand(
       }),
     ],
     run: async (input, context) => {
+      const stateAtOldPlace = oldStateMessage(environment);
+      if (stateAtOldPlace !== undefined)
+        return context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          },
+          { message: stateAtOldPlace, data: null, effects: nothingChanged },
+        );
       const settingsFile = settingsPath(environment);
       const loaded = await loadSettings(settingsFile);
       if (loaded.kind === "missing")
@@ -460,7 +482,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
           },
           {
-            message: `Settings file not found at ${settingsFile}.`,
+            message: settingsMissingMessage(environment, settingsFile),
             data: null,
             effects: nothingChanged,
           },

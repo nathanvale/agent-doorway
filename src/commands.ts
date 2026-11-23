@@ -45,7 +45,7 @@ function buildCommands(
   return [
     status,
     openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
-    pendingCommand(state, stateFolder),
+    pendingCommand(state, stateFolder, environment),
   ] as const;
 }
 

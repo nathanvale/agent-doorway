@@ -1584,7 +1584,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
         cli,
         commands: [
           openCommand(failingJournalState, fixture.environment, parsePath),
-          pendingCommand(realState, fixture.stateFolder),
+          pendingCommand(realState, fixture.stateFolder, fixture.environment),
         ],
         causes,
         state: realState.descriptor,
@@ -1763,7 +1763,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
           cli,
           commands: [
             openCommand(stubState, fixture.environment, parsePath),
-            pendingCommand(realState, fixture.stateFolder),
+            pendingCommand(realState, fixture.stateFolder, fixture.environment),
           ],
           causes,
           state: realState.descriptor,
@@ -1848,7 +1848,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
         cli,
         commands: [
           openCommand(failingJournalState, fixture.environment, parsePath),
-          pendingCommand(realState, fixture.stateFolder),
+          pendingCommand(realState, fixture.stateFolder, fixture.environment),
         ],
         causes,
         state: realState.descriptor,
@@ -1883,6 +1883,383 @@ describe("doorway open and doorway pending through the real CLI", () => {
       if (eventsFile !== undefined && existsSync(eventsFile)) {
         chmodSync(eventsFile, 0o600);
       }
+      fixture.cleanup();
+    }
+  });
+});
+
+function withoutVariables(
+  environment: Record<string, string>,
+  ...names: readonly string[]
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !names.includes(name)),
+  );
+}
+
+function singleQuoted(pathValue: string): string {
+  return `'${pathValue.replaceAll("'", "'\\''")}'`;
+}
+
+function expectedMoveCommand(
+  oldPath: string,
+  newParent: string,
+  newPath: string,
+): string {
+  return `mkdir -p ${singleQuoted(newParent)} && mv ${singleQuoted(oldPath)} ${singleQuoted(newPath)}`;
+}
+
+function runShell(commandLine: string): number {
+  return Bun.spawnSync(["/bin/sh", "-c", commandLine], {
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 10_000,
+  }).exitCode;
+}
+
+function messageOf(stdout: string): string {
+  return String(ownProperty(parseJson(stdout), "message"));
+}
+
+describe("default doorway folders inside my-agent-dojo", () => {
+  test("open refuses a settings file left at the old place, names the move command, writes nothing, and opens once the move has run", () => {
+    const fixture = createFixture();
+    try {
+      const configBase = join(fixture.root, "nathan's config");
+      const oldSettings = join(configBase, "doorway", "settings.json");
+      const newParent = join(configBase, "my-agent-dojo", "doorway");
+      const newSettings = join(newParent, "settings.json");
+      mkdirSync(join(configBase, "doorway"), { recursive: true });
+      const settingsText = readFileSync(fixture.settingsFile, "utf8");
+      writeFileSync(oldSettings, settingsText);
+      const environment = {
+        ...withoutVariables(fixture.environment, "DOORWAY_SETTINGS"),
+        XDG_CONFIG_HOME: configBase,
+      };
+
+      const refused = invokeCli(environment, "open", "example", "--json");
+      expect(refused.exitCode).toBe(3);
+      expect(parseJson(refused.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      const moveCommand = expectedMoveCommand(
+        oldSettings,
+        newParent,
+        newSettings,
+      );
+      const message = messageOf(refused.stdout);
+      expect(message).toContain(oldSettings);
+      expect(message).toContain(newSettings);
+      expect(message).toContain(moveCommand);
+      expect(existsSync(join(configBase, "my-agent-dojo"))).toBe(false);
+      expect(readFileSync(oldSettings, "utf8")).toBe(settingsText);
+      expect(existsSync(fixture.stateFolder)).toBe(false);
+      expect(existsSync(fixture.sshLog)).toBe(false);
+      expect(existsSync(fixture.editorLog)).toBe(false);
+
+      expect(runShell(moveCommand)).toBe(0);
+      expect(existsSync(oldSettings)).toBe(false);
+      const opened = invokeCli(environment, "open", "example", "--json");
+      expect(opened.exitCode).toBe(0);
+      expect(parseJson(opened.stdout)).toMatchObject({
+        result: { causeCode: "SUCCESS_COMPLETED" },
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("open and pending refuse a state folder left at the old place, name the move command, and do not create the new folder", () => {
+    const fixture = createFixture();
+    try {
+      const stateBase = join(fixture.root, ".local", "state");
+      const oldState = join(stateBase, "doorway");
+      const newParent = join(stateBase, "my-agent-dojo");
+      const newState = join(newParent, "doorway");
+      const seeded = invokeCli(
+        { ...fixture.environment, DOORWAY_STATE: oldState },
+        "open",
+        "example",
+        "--json",
+      );
+      expect(seeded.exitCode).toBe(0);
+      expect(existsSync(oldState)).toBe(true);
+      rmSync(fixture.sshLog, { force: true });
+      rmSync(fixture.editorLog, { force: true });
+      const environment = withoutVariables(
+        fixture.environment,
+        "DOORWAY_STATE",
+      );
+      const moveCommand = expectedMoveCommand(oldState, newParent, newState);
+
+      const pendingRefused = invokeCli(environment, "pending", "--json");
+      expect(pendingRefused.exitCode).toBe(3);
+      expect(parseJson(pendingRefused.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.pending",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          data: null,
+        },
+      });
+      const pendingMessage = messageOf(pendingRefused.stdout);
+      expect(pendingMessage).toContain(oldState);
+      expect(pendingMessage).toContain(newState);
+      expect(pendingMessage).toContain(moveCommand);
+
+      const openRefused = invokeCli(environment, "open", "example", "--json");
+      expect(openRefused.exitCode).toBe(3);
+      expect(parseJson(openRefused.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      const openMessage = messageOf(openRefused.stdout);
+      expect(openMessage).toContain(oldState);
+      expect(openMessage).toContain(newState);
+      expect(openMessage).toContain(moveCommand);
+      expect(existsSync(newParent)).toBe(false);
+      expect(existsSync(fixture.sshLog)).toBe(false);
+      expect(existsSync(fixture.editorLog)).toBe(false);
+
+      expect(runShell(moveCommand)).toBe(0);
+      expect(existsSync(oldState)).toBe(false);
+      const pendingAfterMove = invokeCli(environment, "pending", "--json");
+      expect(pendingAfterMove.exitCode).toBe(0);
+      expect(parseJson(pendingAfterMove.stdout)).toMatchObject({
+        result: {
+          causeCode: "SUCCESS_UNCHANGED",
+          data: { stateFolder: newState, unfinished: [] },
+        },
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("DOORWAY_SETTINGS and DOORWAY_STATE win and skip the old-place check, which runs once they are unset", () => {
+    const fixture = createFixture();
+    try {
+      const oldSettings = join(
+        fixture.root,
+        ".config",
+        "doorway",
+        "settings.json",
+      );
+      const oldState = join(fixture.root, ".local", "state", "doorway");
+      mkdirSync(join(fixture.root, ".config", "doorway"), { recursive: true });
+      writeFileSync(oldSettings, "{broken");
+      mkdirSync(oldState, { recursive: true, mode: 0o700 });
+
+      const opened = invokeCli(
+        fixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(opened.exitCode).toBe(0);
+      expect(parseJson(opened.stdout)).toMatchObject({
+        result: { causeCode: "SUCCESS_COMPLETED" },
+      });
+      const pending = invokeCli(fixture.environment, "pending", "--json");
+      expect(pending.exitCode).toBe(0);
+      expect(parseJson(pending.stdout)).toMatchObject({
+        result: {
+          causeCode: "SUCCESS_UNCHANGED",
+          data: { stateFolder: fixture.stateFolder },
+        },
+      });
+
+      const noSettingsOverride = invokeCli(
+        withoutVariables(fixture.environment, "DOORWAY_SETTINGS"),
+        "open",
+        "example",
+        "--json",
+      );
+      expect(noSettingsOverride.exitCode).toBe(3);
+      expect(parseJson(noSettingsOverride.stdout)).toMatchObject({
+        result: { causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING" },
+      });
+      expect(messageOf(noSettingsOverride.stdout)).toContain(oldSettings);
+
+      const noStateOverride = invokeCli(
+        withoutVariables(fixture.environment, "DOORWAY_STATE"),
+        "pending",
+        "--json",
+      );
+      expect(noStateOverride.exitCode).toBe(3);
+      expect(parseJson(noStateOverride.stdout)).toMatchObject({
+        result: { causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE" },
+      });
+      expect(messageOf(noStateOverride.stdout)).toContain(oldState);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("uses the new places when old and new both exist, and keeps the missing-settings and empty-pending results when neither exists", () => {
+    const both = createFixture();
+    const neither = createFixture();
+    try {
+      const newSettingsFolder = join(
+        both.root,
+        ".config",
+        "my-agent-dojo",
+        "doorway",
+      );
+      const newState = join(
+        both.root,
+        ".local",
+        "state",
+        "my-agent-dojo",
+        "doorway",
+      );
+      mkdirSync(newSettingsFolder, { recursive: true });
+      writeFileSync(
+        join(newSettingsFolder, "settings.json"),
+        readFileSync(both.settingsFile, "utf8"),
+      );
+      mkdirSync(join(both.root, ".config", "doorway"), { recursive: true });
+      writeFileSync(
+        join(both.root, ".config", "doorway", "settings.json"),
+        "{broken",
+      );
+      mkdirSync(newState, { recursive: true, mode: 0o700 });
+      mkdirSync(join(both.root, ".local", "state", "doorway"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const bothEnvironment = withoutVariables(
+        both.environment,
+        "DOORWAY_SETTINGS",
+        "DOORWAY_STATE",
+      );
+
+      const opened = invokeCli(bothEnvironment, "open", "example", "--json");
+      expect(opened.exitCode).toBe(0);
+      expect(parseJson(opened.stdout)).toMatchObject({
+        result: { causeCode: "SUCCESS_COMPLETED" },
+      });
+      const pendingBoth = invokeCli(bothEnvironment, "pending", "--json");
+      expect(pendingBoth.exitCode).toBe(0);
+      expect(parseJson(pendingBoth.stdout)).toMatchObject({
+        result: {
+          causeCode: "SUCCESS_UNCHANGED",
+          data: { stateFolder: newState, unfinished: [] },
+        },
+      });
+
+      const neitherEnvironment = withoutVariables(
+        neither.environment,
+        "DOORWAY_SETTINGS",
+        "DOORWAY_STATE",
+      );
+      const neitherSettings = join(
+        neither.root,
+        ".config",
+        "my-agent-dojo",
+        "doorway",
+        "settings.json",
+      );
+      const neitherState = join(
+        neither.root,
+        ".local",
+        "state",
+        "my-agent-dojo",
+        "doorway",
+      );
+      const missing = invokeCli(
+        neitherEnvironment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(missing.exitCode).toBe(3);
+      expect(parseJson(missing.stdout)).toMatchObject({
+        result: { causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING" },
+      });
+      expect(messageOf(missing.stdout)).toBe(
+        `Settings file not found at ${neitherSettings}.`,
+      );
+      const pendingNeither = invokeCli(neitherEnvironment, "pending", "--json");
+      expect(pendingNeither.exitCode).toBe(0);
+      expect(parseJson(pendingNeither.stdout)).toMatchObject({
+        result: {
+          causeCode: "SUCCESS_UNCHANGED",
+          data: { stateFolder: neitherState, unfinished: [] },
+        },
+      });
+      expect(existsSync(neitherState)).toBe(false);
+    } finally {
+      both.cleanup();
+      neither.cleanup();
+    }
+  });
+
+  test("open refuses a state folder left at the old place before it checks settings, whether settings are missing or invalid, and creates nothing", () => {
+    const fixture = createFixture();
+    try {
+      const stateBase = join(fixture.root, ".local", "state");
+      const oldState = join(stateBase, "doorway");
+      const newParent = join(stateBase, "my-agent-dojo");
+      const newState = join(newParent, "doorway");
+      const newSettingsFolder = join(
+        fixture.root,
+        ".config",
+        "my-agent-dojo",
+        "doorway",
+      );
+      mkdirSync(oldState, { recursive: true, mode: 0o700 });
+      const environment = withoutVariables(
+        fixture.environment,
+        "DOORWAY_SETTINGS",
+        "DOORWAY_STATE",
+      );
+      const moveCommand = expectedMoveCommand(oldState, newParent, newState);
+
+      const noSettings = invokeCli(environment, "open", "example", "--json");
+      expect(noSettings.exitCode).toBe(3);
+      expect(parseJson(noSettings.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      expect(messageOf(noSettings.stdout)).toContain(moveCommand);
+      expect(existsSync(newParent)).toBe(false);
+      expect(existsSync(newSettingsFolder)).toBe(false);
+
+      mkdirSync(newSettingsFolder, { recursive: true });
+      writeFileSync(join(newSettingsFolder, "settings.json"), "{broken");
+      const invalidSettings = invokeCli(
+        environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(invalidSettings.exitCode).toBe(3);
+      expect(parseJson(invalidSettings.stdout)).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          transactionState: "unchanged",
+          data: null,
+        },
+      });
+      expect(messageOf(invalidSettings.stdout)).toContain(moveCommand);
+      expect(existsSync(newParent)).toBe(false);
+      expect(existsSync(fixture.sshLog)).toBe(false);
+      expect(existsSync(fixture.editorLog)).toBe(false);
+    } finally {
       fixture.cleanup();
     }
   });
