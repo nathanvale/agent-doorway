@@ -1552,7 +1552,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("refuses with a declared state station when the state journal cannot append effect-started before starting the editor", async () => {
+  test("reports an unconfirmed open that doorway pending lists, without starting the editor, when the state journal cannot append effect-started or the completion", async () => {
     const fixture = createFixture();
     let eventsFile: string | undefined;
     try {
@@ -1600,22 +1600,35 @@ describe("doorway open and doorway pending through the real CLI", () => {
       expect(ran.exitCode).toBe(3);
       expect(ran.envelope.result).toMatchObject({
         commandIdentity: "doorway.open",
-        outcome: "refused",
-        transactionState: "unchanged",
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+        attemptedEffect: "editor.open",
         data: null,
         effects: {
           completed: [],
           remaining: ["editor.open"],
           uncertain: [],
-          inventoryComplete: true,
+          inventoryComplete: false,
         },
         handoff: {
           owner: "operator",
           inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
         },
       });
+      expect(ran.envelope.message).toContain("The editor did not start");
       expect(existsSync(fixture.editorLog)).toBe(false);
+
+      const pending = await runInProcess(contract, {
+        emergencyRecord: realState.emergencyRecord,
+        addons: { programs: programsAddon() },
+      })(["pending", "--json"]);
+      expect(pending.kind).toBe("envelope");
+      if (pending.kind !== "envelope") return;
+      expect(pending.envelope.result).toMatchObject({
+        commandIdentity: "doorway.pending",
+        data: { unfinished: [{ commandIdentity: "doorway.open" }] },
+      });
     } finally {
       if (eventsFile !== undefined && existsSync(eventsFile)) {
         chmodSync(eventsFile, 0o600);
@@ -1864,9 +1877,9 @@ describe("doorway open and doorway pending through the real CLI", () => {
       expect(ran.exitCode).toBe(3);
       expect(ran.envelope.result).toMatchObject({
         commandIdentity: "doorway.open",
-        outcome: "refused",
-        transactionState: "unchanged",
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        outcome: "failed",
+        transactionState: "unknown",
+        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
         superseded: [killedOperationId],
         data: null,
         handoff: {

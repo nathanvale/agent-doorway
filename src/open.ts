@@ -156,6 +156,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function unconfirmedMessage(
+  name: string,
+  editorNeverStarted: boolean,
+  detail: string,
+): string {
+  const because = detail === "" ? "" : `: ${detail}`;
+  return editorNeverStarted
+    ? `Doorway state could not record ${name} before starting the isolated editor${because}, and could not mark the open finished, so doorway pending lists it. The editor did not start; once the state folder accepts writes, running doorway open again clears it.`
+    : `Could not confirm that the isolated editor stopped cleanly for ${name}${because}.`;
+}
+
 function editorStoppedCleanly(result: ProgramResult): boolean {
   const details = programDetails(result);
   return (
@@ -456,7 +467,7 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
         trigger:
-          "The isolated editor started, and doorway could not confirm that it stopped cleanly.",
+          "The isolated editor started and doorway could not confirm that it stopped cleanly, or doorway state could not record the open before starting the editor and could not mark it finished.",
         repairAction:
           "Run doorway pending and check whether the isolated editor launcher is still running. Once the earlier run has stopped, running doorway open again clears this unfinished case and launches the editor again.",
         guidance: { handoff: openUnconfirmedHandoff },
@@ -747,7 +758,11 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
           },
           {
-            message: `Could not confirm that the isolated editor stopped cleanly for ${destination.name}${unconfirmedDetail === "" ? "" : `: ${unconfirmedDetail}`}.${cleared}`,
+            message: `${unconfirmedMessage(
+              destination.name,
+              outcome.proof.effects.remaining.includes("editor.open"),
+              unconfirmedDetail,
+            )}${cleared}`,
             data: null,
             transaction: outcome.proof,
             attemptedEffect: "editor.open",
