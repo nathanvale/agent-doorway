@@ -1,9 +1,0 @@
-{
-  "specRevision": "4",
-  "templateRevision": "c0d61de4015ad03732920c267817d8f9ae3a191c",
-  "templateDirty": false,
-  "sourcePacket": "https://github.com/nathanvale/agent-doorway",
-  "entryPoint": "src/cli.ts",
-  "commandOwner": "src/commands.ts",
-  "registrationVersion": 1
-}

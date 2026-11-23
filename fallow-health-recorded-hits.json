@@ -1,0 +1,67 @@
+{
+  "kind": "health",
+  "finding_counts": {
+    "src/open.ts": {
+      "complexity_critical": {
+        "count": 1
+      },
+      "complexity_moderate": {
+        "count": 1
+      },
+      "crap_critical": {
+        "count": 1
+      }
+    },
+    "src/settings.ts": {
+      "complexity_critical": {
+        "count": 2
+      },
+      "crap_critical": {
+        "count": 2
+      }
+    },
+    "tests/open.test.ts": {
+      "complexity_moderate": {
+        "count": 1
+      }
+    }
+  },
+  "identity_finding_counts": {
+    "src/open.ts\u0000<file>": {
+      "complexity_moderate": {
+        "count": 1
+      }
+    },
+    "src/open.ts\u0000run": {
+      "complexity_critical": {
+        "count": 1
+      },
+      "crap_critical": {
+        "count": 1
+      }
+    },
+    "src/settings.ts\u0000parseDestination": {
+      "complexity_critical": {
+        "count": 1
+      },
+      "crap_critical": {
+        "count": 1
+      }
+    },
+    "src/settings.ts\u0000parseSettings": {
+      "complexity_critical": {
+        "count": 1
+      },
+      "crap_critical": {
+        "count": 1
+      }
+    },
+    "tests/open.test.ts\u0000<file>": {
+      "complexity_moderate": {
+        "count": 1
+      }
+    }
+  },
+  "runtime_coverage_findings": [],
+  "target_keys": ["src/open.ts:complexity", "src/settings.ts:high impact"]
+}
