@@ -132,6 +132,14 @@ function supersededNote(superseded: readonly string[] | undefined): string {
   return ` Cleared ${label}: ${superseded.join(", ")}.`;
 }
 
+function refusedSupersededNote(
+  superseded: readonly string[] | undefined,
+): string {
+  const cleared = supersededNote(superseded);
+  if (cleared === "") return "";
+  return `${cleared} Run doorway pending to inspect.`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -668,11 +676,19 @@ export function openCommand(
         },
       );
 
+      const clearedOnRefusal = refusedSupersededNote(outcome.superseded);
       if (outcome.kind !== "ran") {
         const refused = stateRefusal(outcome, destination.name);
         return context.result(
           { commandIdentity: identity, causeCode: refused.causeCode },
-          { message: refused.message, data: null, effects: nothingChanged },
+          {
+            message: `${refused.message}${clearedOnRefusal}`,
+            data: null,
+            effects:
+              outcome.proof.transactionState === "unchanged"
+                ? outcome.proof.effects
+                : nothingChanged,
+          },
         );
       }
 
@@ -685,7 +701,7 @@ export function openCommand(
             causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
           },
           {
-            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.${cleared}`,
+            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.${clearedOnRefusal}`,
             data: null,
             effects: outcome.proof.effects,
           },

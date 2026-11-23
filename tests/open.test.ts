@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -1614,6 +1615,269 @@ describe("doorway open and doorway pending through the real CLI", () => {
           inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
         },
       });
+      expect(existsSync(fixture.editorLog)).toBe(false);
+    } finally {
+      if (eventsFile !== undefined && existsSync(eventsFile)) {
+        chmodSync(eventsFile, 0o600);
+      }
+      fixture.cleanup();
+    }
+  });
+
+  test("reports the cleared earlier open and points to doorway pending when a flagged open clears one unfinished case and is then refused", async () => {
+    const fixture = createFixture();
+    let blockedOperationFolder: string | undefined;
+    try {
+      const firstCreatedId = await runKilledOpen(fixture);
+      const savedOperationFolder = join(fixture.root, "saved-operation");
+      renameSync(
+        join(fixture.stateFolder, "operations", firstCreatedId),
+        savedOperationFolder,
+      );
+      const secondCreatedId = await runKilledOpen(fixture);
+      renameSync(
+        savedOperationFolder,
+        join(fixture.stateFolder, "operations", firstCreatedId),
+      );
+
+      const orderedIds = [firstCreatedId, secondCreatedId].sort();
+      const clearedId = orderedIds[0];
+      const blockedId = orderedIds[1];
+      if (clearedId === undefined || blockedId === undefined)
+        throw new Error("Expected two distinct killed operation ids.");
+
+      blockedOperationFolder = join(
+        fixture.stateFolder,
+        "operations",
+        blockedId,
+      );
+      chmodSync(blockedOperationFolder, 0o500);
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+
+      const refused = invokeCli(
+        fixture.environment,
+        "open",
+        "example",
+        "--json",
+      );
+      expect(refused.exitCode).toBe(3);
+      expect(refused.stderr).toBe("");
+      const refusedEnvelope = parseJson(refused.stdout);
+      expect(refusedEnvelope).toMatchObject({
+        result: {
+          commandIdentity: "doorway.open",
+          outcome: "refused",
+          transactionState: "unchanged",
+          causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+          superseded: [clearedId],
+          data: null,
+          handoff: {
+            owner: "operator",
+            inspect: [
+              { kind: "command", command: "doorway.pending", args: [] },
+            ],
+          },
+        },
+      });
+      const refusedMessage = String(ownProperty(refusedEnvelope, "message"));
+      expect(refusedMessage).toContain(
+        `Cleared earlier unfinished operation: ${clearedId}.`,
+      );
+      expect(refusedMessage).toContain("doorway pending");
+      expect(existsSync(fixture.editorLog)).toBe(false);
+      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([
+        blockedId,
+      ]);
+
+      chmodSync(blockedOperationFolder, 0o700);
+      renameSync(blockedOperationFolder, savedOperationFolder);
+      const thirdCreatedId = await runKilledOpen(fixture);
+      renameSync(savedOperationFolder, blockedOperationFolder);
+
+      const humanOrderedIds = [thirdCreatedId, blockedId].sort();
+      const humanClearedId = humanOrderedIds[0];
+      const humanBlockedId = humanOrderedIds[1];
+      if (humanClearedId === undefined || humanBlockedId === undefined)
+        throw new Error("Expected two distinct operation ids for human check.");
+      blockedOperationFolder = join(
+        fixture.stateFolder,
+        "operations",
+        humanBlockedId,
+      );
+      chmodSync(blockedOperationFolder, 0o500);
+      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+      const humanRefused = invokeCli(fixture.environment, "open", "example");
+      expect(humanRefused.exitCode).toBe(3);
+      expect(humanRefused.stdout).toBe("");
+      expect(humanRefused.stderr).toContain(
+        `Cleared earlier unfinished operation: ${humanClearedId}.`,
+      );
+      expect(humanRefused.stderr).toContain("doorway pending");
+      expect(humanRefused.stderr).toContain(
+        "[DOMAIN_DOORWAY_STATE_UNAVAILABLE]",
+      );
+    } finally {
+      if (
+        blockedOperationFolder !== undefined &&
+        existsSync(blockedOperationFolder)
+      ) {
+        chmodSync(blockedOperationFolder, 0o700);
+      }
+      fixture.cleanup();
+    }
+  });
+
+  test("reports multiple cleared cases and points to doorway pending on unresolved-case refusal after closure, and omits that note when nothing was cleared", async () => {
+    const fixture = createFixture();
+    try {
+      const realState = stateAddon({
+        root: fixture.stateFolder,
+        report: "doorway.pending",
+      });
+      const firstClearedId = "op-0000000000000001";
+      const secondClearedId = "op-0000000000000002";
+      const remainingId = "op-0000000000000003";
+
+      const runWithRefusal = async (
+        superseded: readonly string[] | undefined,
+      ) => {
+        const stubState: DoorwayState = {
+          ...realState,
+          transaction: async (capability, declaration) => {
+            const base = await realState.transaction(
+              capability,
+              { ...declaration, supersedeUnresolved: false },
+              () => Promise.resolve(),
+            );
+            return {
+              kind: "unresolved-case",
+              operationId: remainingId,
+              proof: base.proof,
+              ...(superseded === undefined ? {} : { superseded }),
+            };
+          },
+        };
+        const parsePath = (value: string): ParsedPath =>
+          contract.boundary.path(value);
+        const contract = contractFor({
+          cli,
+          commands: [
+            openCommand(stubState, fixture.environment, parsePath),
+            pendingCommand(realState, fixture.stateFolder),
+          ],
+          causes,
+          state: realState.descriptor,
+          installedAddons: ["state", "programs"],
+        });
+        return runInProcess(contract, {
+          emergencyRecord: realState.emergencyRecord,
+          addons: { programs: programsAddon() },
+        })(["open", "example", "--json"]);
+      };
+
+      const withSuperseded = await runWithRefusal([
+        firstClearedId,
+        secondClearedId,
+      ]);
+      expect(withSuperseded.kind).toBe("envelope");
+      if (withSuperseded.kind !== "envelope") return;
+      expect(withSuperseded.exitCode).toBe(3);
+      expect(withSuperseded.envelope.result).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "refused",
+        transactionState: "unchanged",
+        causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
+        data: null,
+        handoff: {
+          owner: "operator",
+          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
+        },
+      });
+      expect(withSuperseded.envelope.message).toContain(
+        `Cleared earlier unfinished operations: ${firstClearedId}, ${secondClearedId}.`,
+      );
+      expect(withSuperseded.envelope.message).toContain("doorway pending");
+      expect(withSuperseded.envelope.message).toContain(remainingId);
+
+      const withoutSuperseded = await runWithRefusal(undefined);
+      expect(withoutSuperseded.kind).toBe("envelope");
+      if (withoutSuperseded.kind !== "envelope") return;
+      expect(withoutSuperseded.exitCode).toBe(3);
+      expect(withoutSuperseded.envelope.message).toContain(remainingId);
+      expect(withoutSuperseded.envelope.message).not.toContain(
+        "Cleared earlier unfinished",
+      );
+      expect(withoutSuperseded.envelope.message).not.toContain(
+        "Run doorway pending",
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("reports the cleared earlier open and points to doorway pending when the journal cannot append effect-started after clearing an earlier killed open", async () => {
+    const fixture = createFixture();
+    let eventsFile: string | undefined;
+    try {
+      const killedOperationId = await runKilledOpen(fixture);
+      const realState = stateAddon({
+        root: fixture.stateFolder,
+        report: "doorway.pending",
+      });
+      const failingJournalState: DoorwayState = {
+        ...realState,
+        transaction: (capability, declaration, work) =>
+          realState.transaction(
+            capability,
+            declaration,
+            (transaction, published) => {
+              eventsFile = join(
+                fixture.stateFolder,
+                "operations",
+                published.operationId,
+                "events",
+              );
+              chmodSync(eventsFile, 0o400);
+              return work(transaction, published);
+            },
+          ),
+      };
+      const parsePath = (value: string): ParsedPath =>
+        contract.boundary.path(value);
+      const contract = contractFor({
+        cli,
+        commands: [
+          openCommand(failingJournalState, fixture.environment, parsePath),
+          pendingCommand(realState, fixture.stateFolder),
+        ],
+        causes,
+        state: realState.descriptor,
+        installedAddons: ["state", "programs"],
+      });
+
+      const ran = await runInProcess(contract, {
+        emergencyRecord: realState.emergencyRecord,
+        addons: { programs: programsAddon() },
+      })(["open", "example", "--json"]);
+      expect(ran.kind).toBe("envelope");
+      if (ran.kind !== "envelope") return;
+      expect(ran.exitCode).toBe(3);
+      expect(ran.envelope.result).toMatchObject({
+        commandIdentity: "doorway.open",
+        outcome: "refused",
+        transactionState: "unchanged",
+        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
+        superseded: [killedOperationId],
+        data: null,
+        handoff: {
+          owner: "operator",
+          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
+        },
+      });
+      expect(ran.envelope.message).toContain(
+        `Cleared earlier unfinished operation: ${killedOperationId}.`,
+      );
+      expect(ran.envelope.message).toContain("doorway pending");
       expect(existsSync(fixture.editorLog)).toBe(false);
     } finally {
       if (eventsFile !== undefined && existsSync(eventsFile)) {
