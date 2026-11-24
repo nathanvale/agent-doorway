@@ -11,7 +11,7 @@ Keep domain implementation in separate files and preserve one public application
 Check command: bun run check
 Smoke: bun run start --help
 Source packet: https://github.com/nathanvale/agent-doorway
-Template source: 1ba43a5cfa6ae37c212cae708f82c12842223bfa
+Template source: 9ed0d318155e938e66318a68ee4f685909547b04
 
 ## Comments
 
