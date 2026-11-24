@@ -1,0 +1,5 @@
+---
+"agent-doorway": patch
+---
+
+Ignored relative XDG_CONFIG_HOME, XDG_STATE_HOME, and HOME values in settings and state path resolution so doorway falls back to absolute XDG Base Directory Specification v0.8 defaults or refuses cleanly when no absolute home directory is available instead of reading or writing relative to the current working directory.
