@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -89,9 +89,12 @@ function isSafeDockerEndpoint(value: string): boolean {
   return isSafeRemotePath(value.slice("unix://".length));
 }
 
+function absolutePath(value: string | undefined): string | undefined {
+  return value !== undefined && isAbsolute(value) ? value : undefined;
+}
+
 export function homeOf(environment: Environment): string {
-  const value = environment.HOME;
-  return value !== undefined && value !== "" ? value : homedir();
+  return absolutePath(environment.HOME) ?? homedir();
 }
 
 export function expandHome(pathValue: string, home: string): string {
@@ -108,14 +111,14 @@ function nonEmpty(value: string | undefined): string | undefined {
 
 function configBase(environment: Environment): string {
   return (
-    nonEmpty(environment.XDG_CONFIG_HOME) ??
+    absolutePath(environment.XDG_CONFIG_HOME) ??
     join(homeOf(environment), ".config")
   );
 }
 
 function stateBase(environment: Environment): string {
   return (
-    nonEmpty(environment.XDG_STATE_HOME) ??
+    absolutePath(environment.XDG_STATE_HOME) ??
     join(homeOf(environment), ".local", "state")
   );
 }

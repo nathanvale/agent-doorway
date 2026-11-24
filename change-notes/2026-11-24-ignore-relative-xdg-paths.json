@@ -1,0 +1,7 @@
+{
+  "kind": "fixed",
+  "breaking": false,
+  "affects": ["cli"],
+  "summary": "Ignored relative XDG_CONFIG_HOME, XDG_STATE_HOME, and HOME values in settings and state path resolution so doorway falls back to XDG Base Directory Specification v0.8 defaults instead of reading or writing relative to the current working directory.",
+  "action": null
+}

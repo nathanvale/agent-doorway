@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { testFolder } from "./support/test-folder.ts";
 
@@ -112,6 +112,98 @@ test("linked doorway runs --help and status from outside the repository", () => 
     }).toEqual({ exitCode: 0, stderr: "" });
     expect(status.stdout.toString()).toContain("Doorway runs.");
     expect(status.stdout.toString()).toContain('"ready": true');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("doorway open and pending ignore relative XDG_CONFIG_HOME and XDG_STATE_HOME and never load a cwd decoy", () => {
+  const scratch = testFolder("cli-xdg-relative-");
+  try {
+    const home = join(scratch, "home");
+    const workdir = join(scratch, "cwd");
+    const decoySettingsDir = join(
+      workdir,
+      "relative",
+      "bad",
+      "my-agent-dojo",
+      "doorway",
+    );
+    const decoyOldDir = join(workdir, "relative", "bad", "doorway");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(decoySettingsDir, { recursive: true });
+    mkdirSync(decoyOldDir, { recursive: true });
+    writeFileSync(join(decoySettingsDir, "settings.json"), "{not-json");
+    writeFileSync(join(decoyOldDir, "settings.json"), "{not-json");
+
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? "",
+      HOME: home,
+      XDG_CONFIG_HOME: "relative/bad",
+      XDG_STATE_HOME: "relative/bad",
+    };
+
+    const opened = Bun.spawnSync(
+      [process.execPath, "run", cli, "open", "example", "--json"],
+      { cwd: workdir, env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect({
+      exitCode: opened.exitCode,
+      stderr: opened.stderr.toString(),
+    }).toEqual({ exitCode: 3, stderr: "" });
+    const openedPayload: unknown = JSON.parse(opened.stdout.toString());
+    expect(openedPayload).toMatchObject({
+      result: {
+        commandIdentity: "doorway.open",
+        causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
+        transactionState: "unchanged",
+        data: null,
+      },
+    });
+    const rawMessage: unknown =
+      typeof openedPayload === "object" &&
+      openedPayload !== null &&
+      Object.hasOwn(openedPayload, "message")
+        ? Reflect.get(openedPayload, "message")
+        : undefined;
+    const openedMessage = typeof rawMessage === "string" ? rawMessage : "";
+    expect(openedMessage).toContain(
+      join(home, ".config", "my-agent-dojo", "doorway", "settings.json"),
+    );
+    expect(openedMessage).not.toContain("relative/bad");
+
+    const pending = Bun.spawnSync(
+      [process.execPath, "run", cli, "pending", "--json"],
+      { cwd: workdir, env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect({
+      exitCode: pending.exitCode,
+      stderr: pending.stderr.toString(),
+    }).toEqual({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(pending.stdout.toString())).toMatchObject({
+      result: {
+        commandIdentity: "doorway.pending",
+        causeCode: "SUCCESS_UNCHANGED",
+        data: {
+          stateFolder: join(
+            home,
+            ".local",
+            "state",
+            "my-agent-dojo",
+            "doorway",
+          ),
+          unfinished: [],
+        },
+      },
+    });
+    expect(
+      existsSync(
+        join(workdir, "relative", "bad", "my-agent-dojo", "doorway", "journal"),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(join(home, ".local", "state", "my-agent-dojo", "doorway")),
+    ).toBe(false);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
