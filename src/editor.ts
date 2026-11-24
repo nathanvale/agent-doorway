@@ -13,12 +13,13 @@ export type EditorPlan = {
 
 export function requiredEditorFolders(
   settings: DoorwaySettings,
-  home: string,
-): readonly [string, string] {
-  return [
-    expandHome(settings.editor.userDataFolder, home),
-    expandHome(settings.editor.extensionsFolder, home),
-  ];
+  home: string | undefined,
+): readonly [string, string] | undefined {
+  const userDataFolder = expandHome(settings.editor.userDataFolder, home);
+  const extensionsFolder = expandHome(settings.editor.extensionsFolder, home);
+  if (userDataFolder === undefined || extensionsFolder === undefined)
+    return undefined;
+  return [userDataFolder, extensionsFolder];
 }
 
 export function remoteAuthority(
@@ -36,14 +37,15 @@ export function editorArguments(
   settings: DoorwaySettings,
   remoteHost: RemoteHostSettings,
   destination: DestinationSettings,
-  home: string,
+  home: string | undefined,
   place?: string,
 ): EditorPlan {
   const authority = remoteAuthority(remoteHost, destination);
-  const [userDataFolder, extensionsFolder] = requiredEditorFolders(
-    settings,
-    home,
-  );
+  const folders = requiredEditorFolders(settings, home);
+  if (folders === undefined) {
+    throw new Error("Editor folder path requires an absolute HOME directory.");
+  }
+  const [userDataFolder, extensionsFolder] = folders;
   const chosenPlace = place ?? destination.folder;
   const openArgs = chosenPlace.endsWith(".code-workspace")
     ? ["--file-uri", `vscode-remote://${authority}${chosenPlace}`]

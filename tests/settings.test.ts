@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  expandHome,
   findDestination,
   homeOf,
   isSafeRemotePath,
@@ -195,6 +196,8 @@ describe("settings and state paths", () => {
       expect(
         statePath({ HOME: "relative/home", XDG_STATE_HOME: "relative/bad" }),
       ).toBe(join(osHome, ".local", "state", "my-agent-dojo", "doorway"));
+      expect(expandHome("~/bin/editor", undefined)).toBeUndefined();
+      expect(expandHome("/abs/bin/editor", undefined)).toBe("/abs/bin/editor");
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }

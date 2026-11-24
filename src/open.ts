@@ -26,9 +26,9 @@ import {
   isSafeRemotePath,
   loadSettings,
   oldSettingsMessage,
-  oldStateMessage,
   settingsPath,
   toolPath,
+  unavailableStateMessage,
 } from "./settings.ts";
 import type { Environment } from "./settings.ts";
 
@@ -512,16 +512,29 @@ export function openCommand(
       }),
     ],
     run: async (input, context) => {
-      const stateAtOldPlace = oldStateMessage(environment);
-      if (stateAtOldPlace !== undefined)
+      const stateProblem = unavailableStateMessage(environment);
+      if (stateProblem !== undefined)
         return context.result(
           {
             commandIdentity: identity,
             causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
           },
-          { message: stateAtOldPlace, data: null, effects: nothingChanged },
+          { message: stateProblem, data: null, effects: nothingChanged },
         );
       const settingsFile = settingsPath(environment);
+      if (settingsFile === undefined)
+        return context.result(
+          {
+            commandIdentity: identity,
+            causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
+          },
+          {
+            message:
+              "Doorway cannot determine an absolute settings path because neither XDG_CONFIG_HOME nor HOME is an absolute path.",
+            data: null,
+            effects: nothingChanged,
+          },
+        );
       const loaded = await loadSettings(settingsFile);
       if (loaded.kind === "missing")
         return context.result(
@@ -575,7 +588,8 @@ export function openCommand(
 
       const { destination, remoteHost } = found;
       const home = homeOf(environment);
-      if (!(await foldersExist(requiredEditorFolders(loaded.settings, home))))
+      const editorFolders = requiredEditorFolders(loaded.settings, home);
+      if (editorFolders === undefined || !(await foldersExist(editorFolders)))
         return context.result(
           {
             commandIdentity: identity,
@@ -592,6 +606,8 @@ export function openCommand(
       const sshExecutable = toolPath(loaded.settings, "ssh", home);
       const editorExecutable = toolPath(loaded.settings, "editor", home);
       if (
+        sshExecutable === undefined ||
+        editorExecutable === undefined ||
         !(await executableExists(envExecutablePath)) ||
         !(await executableExists(sshExecutable)) ||
         !(await executableExists(editorExecutable))
