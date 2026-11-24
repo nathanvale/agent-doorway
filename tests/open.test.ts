@@ -75,21 +75,136 @@ function makeScript(pathValue: string, lines: readonly string[]): string {
 function waitForFile(
   filePath: string,
   timeoutMilliseconds = 10_000,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (existsSync(filePath)) return Promise.resolve();
+  if (signal?.aborted === true) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearInterval(interval);
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      finish();
+      resolve();
+    };
     const interval = setInterval(() => {
       if (existsSync(filePath)) {
-        clearInterval(interval);
-        clearTimeout(timer);
+        finish();
         resolve();
       }
     }, 20);
     const timer = setTimeout(() => {
-      clearInterval(interval);
+      finish();
       reject(new Error(`Timed out waiting for ${filePath}.`));
     }, timeoutMilliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function captureDomainTimeout(
+  start: () => Promise<ProgramResult>,
+  expectedDelayMilliseconds: number,
+): {
+  readonly pending: Promise<ProgramResult>;
+  readonly fireTimeout: (() => void) | undefined;
+} {
+  const realSetTimeout = globalThis.setTimeout;
+  let fireTimeout: (() => void) | undefined;
+  const interceptedSetTimeout = (
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...rest: unknown[]
+  ): ReturnType<typeof realSetTimeout> => {
+    if (
+      fireTimeout === undefined &&
+      typeof callback === "function" &&
+      delay === expectedDelayMilliseconds
+    ) {
+      fireTimeout = () => {
+        Reflect.apply(callback, undefined, rest);
+      };
+      const placeholder = realSetTimeout(() => undefined, 0);
+      clearTimeout(placeholder);
+      return placeholder;
+    }
+    return realSetTimeout(callback, delay, ...rest);
+  };
+  Reflect.set(
+    interceptedSetTimeout,
+    "__promisify__",
+    realSetTimeout.__promisify__,
+  );
+  Reflect.set(globalThis, "setTimeout", interceptedSetTimeout);
+  try {
+    return { pending: start(), fireTimeout };
+  } finally {
+    Reflect.set(globalThis, "setTimeout", realSetTimeout);
+  }
+}
+
+function gateDomainTimeoutOnReadyFile(
+  base: RunAddon<ProgramsCapability>,
+  readyFile: string,
+  readyTimeoutMilliseconds: number,
+): RunAddon<ProgramsCapability> {
+  return {
+    attach(run) {
+      const attached = base.attach(run);
+      return {
+        ...attached,
+        capability: {
+          ...attached.capability,
+          domain(effect) {
+            const real = attached.capability.domain(effect);
+            return {
+              effect: real.effect,
+              start(request) {
+                const { pending, fireTimeout } = captureDomainTimeout(
+                  () => real.start(request),
+                  request.timeoutMilliseconds,
+                );
+                if (fireTimeout === undefined) {
+                  return pending.then(() => {
+                    throw new Error(
+                      "Expected programs addon to arm the domain timeout synchronously.",
+                    );
+                  });
+                }
+                let settled = false;
+                let readyError: Error | undefined;
+                const abortReadyWait = new AbortController();
+                const trackedPending = pending.finally(() => {
+                  settled = true;
+                  abortReadyWait.abort();
+                });
+                void waitForFile(
+                  readyFile,
+                  readyTimeoutMilliseconds,
+                  abortReadyWait.signal,
+                ).then(
+                  () => {
+                    if (!settled && !abortReadyWait.signal.aborted)
+                      fireTimeout();
+                  },
+                  (error: unknown) => {
+                    readyError =
+                      error instanceof Error ? error : new Error(String(error));
+                    if (!settled) fireTimeout();
+                  },
+                );
+                return trackedPending.then((result) => {
+                  if (readyError !== undefined) throw readyError;
+                  return result;
+                });
+              },
+            };
+          },
+        },
+      };
+    },
+  };
 }
 
 type FixtureOptions = {
@@ -1470,27 +1585,39 @@ describe("doorway open and doorway pending through the real CLI", () => {
   test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears", async () => {
     const fixture = createFixture();
     try {
+      const readyFile = join(fixture.root, "editor-ready");
       const sigtermFile = join(fixture.root, "editor-sigterm");
+      const editorTimeoutMilliseconds = 2_000;
+      const readyTimeoutMilliseconds = 10_000;
+      const editorFallbackTimeoutMilliseconds = 15_000;
       makeScript(fixture.fakeEditor, [
         'import { writeFileSync } from "node:fs";',
         'process.on("SIGTERM", () => {',
         `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
         "  process.exit(0);",
         "});",
+        `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
         "setTimeout(() => {",
         "  process.exit(1);",
-        "}, 10_000);",
+        `}, ${String(editorFallbackTimeoutMilliseconds)});`,
       ]);
 
       const doorway = createDoorway(
         fixture.environment,
         ["state", "programs"],
-        2_000,
+        editorTimeoutMilliseconds,
       );
-      const ran = await runInProcess(
-        doorway.contract,
-        doorway.setup,
-      )(["open", "example", "--json"]);
+      const ran = await runInProcess(doorway.contract, {
+        emergencyRecord: doorway.state.emergencyRecord,
+        addons: {
+          programs: gateDomainTimeoutOnReadyFile(
+            doorway.setup.addons.programs,
+            readyFile,
+            readyTimeoutMilliseconds,
+          ),
+        },
+      })(["open", "example", "--json"]);
+      expect(existsSync(readyFile)).toBe(true);
       expect(existsSync(sigtermFile)).toBe(true);
       expect(ran.kind).toBe("envelope");
       if (ran.kind !== "envelope") return;
@@ -1542,7 +1669,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
     } finally {
       fixture.cleanup();
     }
-  });
+  }, 30_000);
 
   test("treats a launcher result with missing programDetails as not confirmed even with exit 0 and terminationConfirmed", async () => {
     const fixture = createFixture();
