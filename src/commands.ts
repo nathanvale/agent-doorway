@@ -37,7 +37,7 @@ const status = command({
 
 function buildCommands(
   state: DoorwayState,
-  stateFolder: string,
+  stateFolder: string | undefined,
   environment: Environment,
   parsePath: (value: string) => ParsedPath,
   editorTimeoutMilliseconds?: number,
@@ -56,7 +56,7 @@ export function createDoorway(
 ) {
   const stateFolder = statePath(environment);
   const state = stateAddon({
-    root: stateFolder,
+    root: stateFolder ?? "",
     report: "doorway.pending",
   });
   const parsePath = (value: string): ParsedPath =>

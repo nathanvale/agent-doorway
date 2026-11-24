@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -89,15 +89,20 @@ function isSafeDockerEndpoint(value: string): boolean {
   return isSafeRemotePath(value.slice("unix://".length));
 }
 
-export function homeOf(environment: Environment): string {
-  const value = environment.HOME;
-  return value !== undefined && value !== "" ? value : homedir();
+function absolutePath(value: string | undefined): string | undefined {
+  return value !== undefined && isAbsolute(value) ? value : undefined;
 }
 
-export function expandHome(pathValue: string, home: string): string {
-  return pathValue.startsWith("~/")
-    ? join(home, pathValue.slice(2))
-    : pathValue;
+export function homeOf(environment: Environment): string | undefined {
+  return absolutePath(environment.HOME) ?? absolutePath(homedir());
+}
+
+export function expandHome(
+  pathValue: string,
+  home: string | undefined,
+): string | undefined {
+  if (!pathValue.startsWith("~/")) return pathValue;
+  return home === undefined ? undefined : join(home, pathValue.slice(2));
 }
 
 const dojoDoorway = ["my-agent-dojo", "doorway"] as const;
@@ -106,42 +111,37 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value === "" ? undefined : value;
 }
 
-function configBase(environment: Environment): string {
-  return (
-    nonEmpty(environment.XDG_CONFIG_HOME) ??
-    join(homeOf(environment), ".config")
-  );
-}
-
-function stateBase(environment: Environment): string {
-  return (
-    nonEmpty(environment.XDG_STATE_HOME) ??
-    join(homeOf(environment), ".local", "state")
-  );
-}
-
-function overrideOf(
+function xdgBase(
   environment: Environment,
-  name: "DOORWAY_SETTINGS" | "DOORWAY_STATE",
+  kind: "config" | "state",
 ): string | undefined {
-  const value = nonEmpty(environment[name]);
-  return value === undefined
+  const value =
+    kind === "config"
+      ? environment.XDG_CONFIG_HOME
+      : environment.XDG_STATE_HOME;
+  const xdg = absolutePath(value);
+  if (xdg !== undefined) return xdg;
+  const home = homeOf(environment);
+  if (home === undefined) return undefined;
+  return kind === "config"
+    ? join(home, ".config")
+    : join(home, ".local", "state");
+}
+
+export function settingsPath(environment: Environment): string | undefined {
+  const override = nonEmpty(environment.DOORWAY_SETTINGS);
+  if (override !== undefined) return expandHome(override, homeOf(environment));
+  const base = xdgBase(environment, "config");
+  return base === undefined
     ? undefined
-    : expandHome(value, homeOf(environment));
+    : join(base, ...dojoDoorway, "settings.json");
 }
 
-export function settingsPath(environment: Environment): string {
-  return (
-    overrideOf(environment, "DOORWAY_SETTINGS") ??
-    join(configBase(environment), ...dojoDoorway, "settings.json")
-  );
-}
-
-export function statePath(environment: Environment): string {
-  return (
-    overrideOf(environment, "DOORWAY_STATE") ??
-    join(stateBase(environment), ...dojoDoorway)
-  );
+export function statePath(environment: Environment): string | undefined {
+  const override = nonEmpty(environment.DOORWAY_STATE);
+  if (override !== undefined) return expandHome(override, homeOf(environment));
+  const base = xdgBase(environment, "state");
+  return base === undefined ? undefined : join(base, ...dojoDoorway);
 }
 
 function singleQuoted(pathValue: string): string {
@@ -158,32 +158,42 @@ function oldPlaceMessage(
   return `The doorway ${subject} is at its old place ${oldPath}. Doorway now uses ${newPath} and does not read or move the old one. Move it, then run doorway again: ${move}`;
 }
 
-export function oldSettingsMessage(
-  environment: Environment,
-): string | undefined {
-  if (overrideOf(environment, "DOORWAY_SETTINGS") !== undefined)
-    return undefined;
+export function oldSettingsMessage(env: Environment): string | undefined {
+  if (nonEmpty(env.DOORWAY_SETTINGS) !== undefined) return undefined;
+  const base = xdgBase(env, "config");
+  if (base === undefined) return undefined;
   return oldPlaceMessage(
     "settings file",
-    join(configBase(environment), "doorway", "settings.json"),
-    settingsPath(environment),
+    join(base, "doorway", "settings.json"),
+    join(base, ...dojoDoorway, "settings.json"),
   );
 }
 
-export function oldStateMessage(environment: Environment): string | undefined {
-  if (overrideOf(environment, "DOORWAY_STATE") !== undefined) return undefined;
+export function oldStateMessage(env: Environment): string | undefined {
+  if (nonEmpty(env.DOORWAY_STATE) !== undefined) return undefined;
+  const base = xdgBase(env, "state");
+  if (base === undefined) return undefined;
   return oldPlaceMessage(
     "state folder",
-    join(stateBase(environment), "doorway"),
-    statePath(environment),
+    join(base, "doorway"),
+    join(base, ...dojoDoorway),
   );
+}
+
+export function unavailableStateMessage(
+  environment: Environment,
+  resolvedStateFolder: string | undefined = statePath(environment),
+): string | undefined {
+  if (resolvedStateFolder === undefined)
+    return "Doorway cannot determine an absolute state folder because neither XDG_STATE_HOME nor HOME is an absolute path.";
+  return oldStateMessage(environment);
 }
 
 export function toolPath(
   settings: DoorwaySettings,
   tool: DoorwayTool,
-  home: string,
-): string {
+  home: string | undefined,
+): string | undefined {
   const override = settings.tools?.[tool];
   if (override === undefined) return defaultTools[tool];
   return expandHome(override, home);

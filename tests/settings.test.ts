@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  expandHome,
   findDestination,
+  homeOf,
   isSafeRemotePath,
   loadSettings,
+  oldSettingsMessage,
+  oldStateMessage,
   settingsPath,
   statePath,
   toolPath,
@@ -98,6 +103,101 @@ describe("settings and state paths", () => {
       expect(statePath({ HOME: folder })).toBe(
         join(folder, ".local", "state", "my-agent-dojo", "doorway"),
       );
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  test("relative XDG_CONFIG_HOME and XDG_STATE_HOME values are ignored and fall back to HOME defaults", () => {
+    const folder = testFolder("xdg-relative-");
+    try {
+      const expectedSettings = join(
+        folder,
+        ".config",
+        "my-agent-dojo",
+        "doorway",
+        "settings.json",
+      );
+      const expectedState = join(
+        folder,
+        ".local",
+        "state",
+        "my-agent-dojo",
+        "doorway",
+      );
+      const relativeValues = ["relative/bad", "./rel", "../rel", "~/rel"];
+
+      for (const relativeValue of relativeValues) {
+        expect(
+          settingsPath({ HOME: folder, XDG_CONFIG_HOME: relativeValue }),
+        ).toBe(expectedSettings);
+        expect(statePath({ HOME: folder, XDG_STATE_HOME: relativeValue })).toBe(
+          expectedState,
+        );
+      }
+
+      const customSettings = join(folder, "explicit-settings.json");
+      const customState = join(folder, "explicit-state");
+      expect(
+        settingsPath({
+          HOME: folder,
+          XDG_CONFIG_HOME: "relative/bad",
+          DOORWAY_SETTINGS: customSettings,
+        }),
+      ).toBe(customSettings);
+      expect(
+        statePath({
+          HOME: folder,
+          XDG_STATE_HOME: "relative/bad",
+          DOORWAY_STATE: customState,
+        }),
+      ).toBe(customState);
+
+      const legacySettings = join(
+        folder,
+        ".config",
+        "doorway",
+        "settings.json",
+      );
+      const legacyState = join(folder, ".local", "state", "doorway");
+      mkdirSync(join(folder, ".config", "doorway"), { recursive: true });
+      mkdirSync(legacyState, { recursive: true });
+      writeFileSync(legacySettings, "{}");
+
+      expect(
+        oldSettingsMessage({ HOME: folder, XDG_CONFIG_HOME: "relative/bad" }),
+      ).toContain(legacySettings);
+      expect(
+        oldStateMessage({ HOME: folder, XDG_STATE_HOME: "relative/bad" }),
+      ).toContain(legacyState);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  test("homeOf falls back to os.homedir when HOME is unset, empty, or relative", () => {
+    const folder = testFolder("home-fallback-");
+    try {
+      const osHome = homedir();
+      expect(homeOf({ HOME: folder })).toBe(folder);
+      expect(homeOf({})).toBe(osHome);
+      expect(homeOf({ HOME: "" })).toBe(osHome);
+      expect(homeOf({ HOME: "relative/home" })).toBe(osHome);
+      expect(homeOf({ HOME: "./home" })).toBe(osHome);
+      expect(homeOf({ HOME: "../home" })).toBe(osHome);
+      expect(
+        settingsPath({
+          HOME: "relative/home",
+          XDG_CONFIG_HOME: "relative/bad",
+        }),
+      ).toBe(
+        join(osHome, ".config", "my-agent-dojo", "doorway", "settings.json"),
+      );
+      expect(
+        statePath({ HOME: "relative/home", XDG_STATE_HOME: "relative/bad" }),
+      ).toBe(join(osHome, ".local", "state", "my-agent-dojo", "doorway"));
+      expect(expandHome("~/bin/editor", undefined)).toBeUndefined();
+      expect(expandHome("/abs/bin/editor", undefined)).toBe("/abs/bin/editor");
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
