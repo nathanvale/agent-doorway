@@ -75,21 +75,213 @@ function makeScript(pathValue: string, lines: readonly string[]): string {
 function waitForFile(
   filePath: string,
   timeoutMilliseconds = 10_000,
-): Promise<void> {
-  if (existsSync(filePath)) return Promise.resolve();
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (existsSync(filePath)) return Promise.resolve(true);
+  if (signal?.aborted === true) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearInterval(interval);
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      finish();
+      resolve(false);
+    };
     const interval = setInterval(() => {
       if (existsSync(filePath)) {
-        clearInterval(interval);
-        clearTimeout(timer);
-        resolve();
+        finish();
+        resolve(true);
       }
     }, 20);
     const timer = setTimeout(() => {
-      clearInterval(interval);
+      finish();
       reject(new Error(`Timed out waiting for ${filePath}.`));
     }, timeoutMilliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function waitWithinBound(
+  pending: Promise<unknown>,
+  boundMilliseconds: number,
+  timeoutError: Error,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(timeoutError);
+    }, boundMilliseconds);
+    void pending.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    );
+  });
+}
+
+function captureDomainTimeout(
+  start: () => Promise<ProgramResult>,
+  expectedDelayMilliseconds: number,
+): {
+  readonly pending: Promise<ProgramResult>;
+  readonly fireTimeout: (() => void) | undefined;
+} {
+  const realSetTimeout = globalThis.setTimeout;
+  let fireTimeout: (() => void) | undefined;
+  const interceptedSetTimeout = (
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...rest: unknown[]
+  ): ReturnType<typeof realSetTimeout> => {
+    if (
+      fireTimeout === undefined &&
+      typeof callback === "function" &&
+      delay === expectedDelayMilliseconds
+    ) {
+      fireTimeout = () => {
+        Reflect.apply(callback, undefined, rest);
+      };
+      const placeholder = realSetTimeout(() => undefined, 0);
+      clearTimeout(placeholder);
+      return placeholder;
+    }
+    return realSetTimeout(callback, delay, ...rest);
+  };
+  Reflect.set(
+    interceptedSetTimeout,
+    "__promisify__",
+    realSetTimeout.__promisify__,
+  );
+  Reflect.set(globalThis, "setTimeout", interceptedSetTimeout);
+  try {
+    return { pending: start(), fireTimeout };
+  } finally {
+    Reflect.set(globalThis, "setTimeout", realSetTimeout);
+  }
+}
+
+type ReadyGatedProgramOptions = {
+  readonly pending: Promise<ProgramResult>;
+  readonly fireTimeout: () => void;
+  readonly killOwned: () => void;
+  readonly readyFile: string;
+  readonly readyTimeoutMilliseconds: number;
+  readonly readinessCleanupMilliseconds: number;
+  readonly onReadinessFailure: (error: Error) => void;
+};
+
+function runReadyGatedProgram(
+  options: ReadyGatedProgramOptions,
+): Promise<ProgramResult> {
+  let settled = false;
+  const abortReadyWait = new AbortController();
+  const trackedPending = options.pending.finally(() => {
+    settled = true;
+    abortReadyWait.abort();
+  });
+  void trackedPending.catch(() => undefined);
+
+  return waitForFile(
+    options.readyFile,
+    options.readyTimeoutMilliseconds,
+    abortReadyWait.signal,
+  ).then(
+    (becameReady) => {
+      if (becameReady && !settled) options.fireTimeout();
+      return trackedPending;
+    },
+    async (error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      const failure = new Error(
+        `Editor never became ready before ${String(options.readyTimeoutMilliseconds)} ms; stopped child process group without firing the domain timeout (${detail})`,
+      );
+      options.onReadinessFailure(failure);
+      if (!settled) options.killOwned();
+      await waitWithinBound(
+        trackedPending,
+        options.readinessCleanupMilliseconds,
+        failure,
+      );
+      throw failure;
+    },
+  );
+}
+
+type ReadyTimeoutGate = {
+  readonly addon: RunAddon<ProgramsCapability>;
+  readonly domainTimeoutFired: () => boolean;
+  readonly throwIfNotReady: () => void;
+};
+
+function gateDomainTimeoutOnReadyFile(
+  base: RunAddon<ProgramsCapability>,
+  readyFile: string,
+  readyTimeoutMilliseconds: number,
+  readinessCleanupMilliseconds: number,
+): ReadyTimeoutGate {
+  let domainTimeoutFired = false;
+  let readinessError: Error | undefined;
+
+  const addon: RunAddon<ProgramsCapability> = {
+    attach(run) {
+      const attached = base.attach(run);
+      return {
+        ...attached,
+        capability: {
+          ...attached.capability,
+          domain(effect) {
+            const real = attached.capability.domain(effect);
+            return {
+              effect: real.effect,
+              start(request) {
+                const { pending, fireTimeout } = captureDomainTimeout(
+                  () => real.start(request),
+                  request.timeoutMilliseconds,
+                );
+                if (fireTimeout === undefined) {
+                  return pending.then(() => {
+                    throw new Error(
+                      "Expected programs addon to arm the domain timeout synchronously.",
+                    );
+                  });
+                }
+                return runReadyGatedProgram({
+                  pending,
+                  fireTimeout: () => {
+                    domainTimeoutFired = true;
+                    fireTimeout();
+                  },
+                  killOwned: () => {
+                    attached.killNow();
+                  },
+                  readyFile,
+                  readyTimeoutMilliseconds,
+                  readinessCleanupMilliseconds,
+                  onReadinessFailure: (error) => {
+                    readinessError = error;
+                  },
+                });
+              },
+            };
+          },
+        },
+      };
+    },
+  };
+
+  return {
+    addon,
+    domainTimeoutFired: () => domainTimeoutFired,
+    throwIfNotReady: () => {
+      if (readinessError !== undefined) throw readinessError;
+    },
+  };
 }
 
 type FixtureOptions = {
@@ -172,6 +364,8 @@ function createFixture(options: FixtureOptions = {}) {
   };
 }
 
+const cliSpawnTimeoutMilliseconds = 20_000;
+
 function spawnCli(
   runtimeArgs: readonly string[],
   environment: Record<string, string>,
@@ -183,7 +377,7 @@ function spawnCli(
       env: environment,
       stdout: "pipe",
       stderr: "pipe",
-      timeout: 20_000,
+      timeout: cliSpawnTimeoutMilliseconds,
     },
   );
   return {
@@ -1467,82 +1661,124 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears", async () => {
-    const fixture = createFixture();
-    try {
-      const sigtermFile = join(fixture.root, "editor-sigterm");
-      makeScript(fixture.fakeEditor, [
-        'import { writeFileSync } from "node:fs";',
-        'process.on("SIGTERM", () => {',
-        `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
-        "  process.exit(0);",
-        "});",
-        "setTimeout(() => {",
-        "  process.exit(1);",
-        "}, 10_000);",
-      ]);
+  const sigtermTrapTestBudget = {
+    sshInspectMilliseconds: 30_000,
+    sshShutdownGraceMilliseconds: 1_000,
+    readyWaitMilliseconds: 10_000,
+    editorTimeoutMilliseconds: 2_000,
+    editorShutdownGraceMilliseconds: 1_000,
+    readinessCleanupMilliseconds: 2_000,
+    pendingBeforeHealMilliseconds: cliSpawnTimeoutMilliseconds,
+    secondOpenMilliseconds: cliSpawnTimeoutMilliseconds,
+    pendingAfterHealMilliseconds: cliSpawnTimeoutMilliseconds,
+    headroomMilliseconds: 10_000,
+  } as const;
+  const sigtermTrapTestTimeoutMilliseconds =
+    sigtermTrapTestBudget.sshInspectMilliseconds +
+    sigtermTrapTestBudget.sshShutdownGraceMilliseconds +
+    sigtermTrapTestBudget.readyWaitMilliseconds +
+    sigtermTrapTestBudget.editorTimeoutMilliseconds +
+    sigtermTrapTestBudget.editorShutdownGraceMilliseconds +
+    sigtermTrapTestBudget.readinessCleanupMilliseconds +
+    sigtermTrapTestBudget.pendingBeforeHealMilliseconds +
+    sigtermTrapTestBudget.secondOpenMilliseconds +
+    sigtermTrapTestBudget.pendingAfterHealMilliseconds +
+    sigtermTrapTestBudget.headroomMilliseconds;
+  const sigtermTrapEditorFallbackMilliseconds = 15_000;
 
-      const doorway = createDoorway(
-        fixture.environment,
-        ["state", "programs"],
-        2_000,
-      );
-      const ran = await runInProcess(
-        doorway.contract,
-        doorway.setup,
-      )(["open", "example", "--json"]);
-      expect(existsSync(sigtermFile)).toBe(true);
-      expect(ran.kind).toBe("envelope");
-      if (ran.kind !== "envelope") return;
-      expect(ran.exitCode).toBe(3);
-      expect(ran.envelope.result).toMatchObject({
-        commandIdentity: "doorway.open",
-        outcome: "failed",
-        transactionState: "unknown",
-        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
-        data: null,
-        effects: {
-          completed: [],
-          remaining: [],
-          uncertain: ["editor.open"],
-          inventoryComplete: true,
-        },
-        handoff: {
-          owner: "operator",
-          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
-        },
-      });
+  test(
+    "ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears",
+    async () => {
+      const fixture = createFixture();
+      try {
+        const readyFile = join(fixture.root, "editor-ready");
+        const sigtermFile = join(fixture.root, "editor-sigterm");
+        makeScript(fixture.fakeEditor, [
+          'import { writeFileSync } from "node:fs";',
+          'process.on("SIGTERM", () => {',
+          `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
+          "  process.exit(0);",
+          "});",
+          `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
+          "setTimeout(() => {",
+          "  process.exit(1);",
+          `}, ${String(sigtermTrapEditorFallbackMilliseconds)});`,
+        ]);
 
-      const timedOutIds = readUnfinishedOperationIds(fixture.environment);
-      expect(timedOutIds).toHaveLength(1);
-      const timedOutId = timedOutIds[0];
-      if (timedOutId === undefined)
-        throw new Error("Expected timed out operationId.");
-
-      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
-      const healed = invokeCli(
-        fixture.environment,
-        "open",
-        "example",
-        "--json",
-      );
-      expect(healed.exitCode).toBe(0);
-      expect(healed.stderr).toBe("");
-      expect(parseJson(healed.stdout)).toMatchObject({
-        result: {
+        const doorway = createDoorway(
+          fixture.environment,
+          ["state", "programs"],
+          sigtermTrapTestBudget.editorTimeoutMilliseconds,
+        );
+        const readyGate = gateDomainTimeoutOnReadyFile(
+          doorway.setup.addons.programs,
+          readyFile,
+          sigtermTrapTestBudget.readyWaitMilliseconds,
+          sigtermTrapTestBudget.readinessCleanupMilliseconds,
+        );
+        const ran = await runInProcess(doorway.contract, {
+          emergencyRecord: doorway.state.emergencyRecord,
+          addons: { programs: readyGate.addon },
+        })(["open", "example", "--json"]);
+        readyGate.throwIfNotReady();
+        expect(readyGate.domainTimeoutFired()).toBe(true);
+        expect(existsSync(readyFile)).toBe(true);
+        expect(existsSync(sigtermFile)).toBe(true);
+        expect(ran.kind).toBe("envelope");
+        if (ran.kind !== "envelope") return;
+        expect(ran.exitCode).toBe(3);
+        expect(ran.envelope.result).toMatchObject({
           commandIdentity: "doorway.open",
-          outcome: "success",
-          transactionState: "completed",
-          causeCode: "SUCCESS_COMPLETED",
-          superseded: [timedOutId],
-        },
-      });
-      expect(existsSync(fixture.editorLog)).toBe(true);
-      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
-    } finally {
-      fixture.cleanup();
-    }
-  });
+          outcome: "failed",
+          transactionState: "unknown",
+          causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+          data: null,
+          effects: {
+            completed: [],
+            remaining: [],
+            uncertain: ["editor.open"],
+            inventoryComplete: true,
+          },
+          handoff: {
+            owner: "operator",
+            inspect: [
+              { kind: "command", command: "doorway.pending", args: [] },
+            ],
+          },
+        });
+
+        const timedOutIds = readUnfinishedOperationIds(fixture.environment);
+        expect(timedOutIds).toHaveLength(1);
+        const timedOutId = timedOutIds[0];
+        if (timedOutId === undefined)
+          throw new Error("Expected timed out operationId.");
+
+        installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+        const healed = invokeCli(
+          fixture.environment,
+          "open",
+          "example",
+          "--json",
+        );
+        expect(healed.exitCode).toBe(0);
+        expect(healed.stderr).toBe("");
+        expect(parseJson(healed.stdout)).toMatchObject({
+          result: {
+            commandIdentity: "doorway.open",
+            outcome: "success",
+            transactionState: "completed",
+            causeCode: "SUCCESS_COMPLETED",
+            superseded: [timedOutId],
+          },
+        });
+        expect(existsSync(fixture.editorLog)).toBe(true);
+        expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    sigtermTrapTestTimeoutMilliseconds,
+  );
 
   test("treats a launcher result with missing programDetails as not confirmed even with exit 0 and terminationConfirmed", async () => {
     const fixture = createFixture();
