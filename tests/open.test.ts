@@ -76,9 +76,9 @@ function waitForFile(
   filePath: string,
   timeoutMilliseconds = 10_000,
   signal?: AbortSignal,
-): Promise<void> {
-  if (existsSync(filePath)) return Promise.resolve();
-  if (signal?.aborted === true) return Promise.resolve();
+): Promise<boolean> {
+  if (existsSync(filePath)) return Promise.resolve(true);
+  if (signal?.aborted === true) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
     const finish = () => {
       clearInterval(interval);
@@ -87,12 +87,12 @@ function waitForFile(
     };
     const onAbort = () => {
       finish();
-      resolve();
+      resolve(false);
     };
     const interval = setInterval(() => {
       if (existsSync(filePath)) {
         finish();
-        resolve();
+        resolve(true);
       }
     }, 20);
     const timer = setTimeout(() => {
@@ -100,6 +100,28 @@ function waitForFile(
       reject(new Error(`Timed out waiting for ${filePath}.`));
     }, timeoutMilliseconds);
     signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function waitWithinBound(
+  pending: Promise<unknown>,
+  boundMilliseconds: number,
+  timeoutError: Error,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(timeoutError);
+    }, boundMilliseconds);
+    void pending.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    );
   });
 }
 
@@ -144,12 +166,69 @@ function captureDomainTimeout(
   }
 }
 
+type ReadyGatedProgramOptions = {
+  readonly pending: Promise<ProgramResult>;
+  readonly fireTimeout: () => void;
+  readonly killOwned: () => void;
+  readonly readyFile: string;
+  readonly readyTimeoutMilliseconds: number;
+  readonly readinessCleanupMilliseconds: number;
+  readonly onReadinessFailure: (error: Error) => void;
+};
+
+function runReadyGatedProgram(
+  options: ReadyGatedProgramOptions,
+): Promise<ProgramResult> {
+  let settled = false;
+  const abortReadyWait = new AbortController();
+  const trackedPending = options.pending.finally(() => {
+    settled = true;
+    abortReadyWait.abort();
+  });
+  void trackedPending.catch(() => undefined);
+
+  return waitForFile(
+    options.readyFile,
+    options.readyTimeoutMilliseconds,
+    abortReadyWait.signal,
+  ).then(
+    (becameReady) => {
+      if (becameReady && !settled) options.fireTimeout();
+      return trackedPending;
+    },
+    async (error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      const failure = new Error(
+        `Editor never became ready before ${String(options.readyTimeoutMilliseconds)} ms; stopped child process group without firing the domain timeout (${detail})`,
+      );
+      options.onReadinessFailure(failure);
+      if (!settled) options.killOwned();
+      await waitWithinBound(
+        trackedPending,
+        options.readinessCleanupMilliseconds,
+        failure,
+      );
+      throw failure;
+    },
+  );
+}
+
+type ReadyTimeoutGate = {
+  readonly addon: RunAddon<ProgramsCapability>;
+  readonly domainTimeoutFired: () => boolean;
+  readonly throwIfNotReady: () => void;
+};
+
 function gateDomainTimeoutOnReadyFile(
   base: RunAddon<ProgramsCapability>,
   readyFile: string,
   readyTimeoutMilliseconds: number,
-): RunAddon<ProgramsCapability> {
-  return {
+  readinessCleanupMilliseconds: number,
+): ReadyTimeoutGate {
+  let domainTimeoutFired = false;
+  let readinessError: Error | undefined;
+
+  const addon: RunAddon<ProgramsCapability> = {
     attach(run) {
       const attached = base.attach(run);
       return {
@@ -172,37 +251,35 @@ function gateDomainTimeoutOnReadyFile(
                     );
                   });
                 }
-                let settled = false;
-                let readyError: Error | undefined;
-                const abortReadyWait = new AbortController();
-                const trackedPending = pending.finally(() => {
-                  settled = true;
-                  abortReadyWait.abort();
-                });
-                void waitForFile(
+                return runReadyGatedProgram({
+                  pending,
+                  fireTimeout: () => {
+                    domainTimeoutFired = true;
+                    fireTimeout();
+                  },
+                  killOwned: () => {
+                    attached.killNow();
+                  },
                   readyFile,
                   readyTimeoutMilliseconds,
-                  abortReadyWait.signal,
-                ).then(
-                  () => {
-                    if (!settled && !abortReadyWait.signal.aborted)
-                      fireTimeout();
+                  readinessCleanupMilliseconds,
+                  onReadinessFailure: (error) => {
+                    readinessError = error;
                   },
-                  (error: unknown) => {
-                    readyError =
-                      error instanceof Error ? error : new Error(String(error));
-                    if (!settled) fireTimeout();
-                  },
-                );
-                return trackedPending.then((result) => {
-                  if (readyError !== undefined) throw readyError;
-                  return result;
                 });
               },
             };
           },
         },
       };
+    },
+  };
+
+  return {
+    addon,
+    domainTimeoutFired: () => domainTimeoutFired,
+    throwIfNotReady: () => {
+      if (readinessError !== undefined) throw readinessError;
     },
   };
 }
@@ -287,6 +364,8 @@ function createFixture(options: FixtureOptions = {}) {
   };
 }
 
+const cliSpawnTimeoutMilliseconds = 20_000;
+
 function spawnCli(
   runtimeArgs: readonly string[],
   environment: Record<string, string>,
@@ -298,7 +377,7 @@ function spawnCli(
       env: environment,
       stdout: "pipe",
       stderr: "pipe",
-      timeout: 20_000,
+      timeout: cliSpawnTimeoutMilliseconds,
     },
   );
   return {
@@ -1582,94 +1661,124 @@ describe("doorway open and doorway pending through the real CLI", () => {
     }
   });
 
-  test("ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears", async () => {
-    const fixture = createFixture();
-    try {
-      const readyFile = join(fixture.root, "editor-ready");
-      const sigtermFile = join(fixture.root, "editor-sigterm");
-      const editorTimeoutMilliseconds = 2_000;
-      const readyTimeoutMilliseconds = 10_000;
-      const editorFallbackTimeoutMilliseconds = 15_000;
-      makeScript(fixture.fakeEditor, [
-        'import { writeFileSync } from "node:fs";',
-        'process.on("SIGTERM", () => {',
-        `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
-        "  process.exit(0);",
-        "});",
-        `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
-        "setTimeout(() => {",
-        "  process.exit(1);",
-        `}, ${String(editorFallbackTimeoutMilliseconds)});`,
-      ]);
+  const sigtermTrapTestBudget = {
+    sshInspectMilliseconds: 30_000,
+    sshShutdownGraceMilliseconds: 1_000,
+    readyWaitMilliseconds: 10_000,
+    editorTimeoutMilliseconds: 2_000,
+    editorShutdownGraceMilliseconds: 1_000,
+    readinessCleanupMilliseconds: 2_000,
+    pendingBeforeHealMilliseconds: cliSpawnTimeoutMilliseconds,
+    secondOpenMilliseconds: cliSpawnTimeoutMilliseconds,
+    pendingAfterHealMilliseconds: cliSpawnTimeoutMilliseconds,
+    headroomMilliseconds: 10_000,
+  } as const;
+  const sigtermTrapTestTimeoutMilliseconds =
+    sigtermTrapTestBudget.sshInspectMilliseconds +
+    sigtermTrapTestBudget.sshShutdownGraceMilliseconds +
+    sigtermTrapTestBudget.readyWaitMilliseconds +
+    sigtermTrapTestBudget.editorTimeoutMilliseconds +
+    sigtermTrapTestBudget.editorShutdownGraceMilliseconds +
+    sigtermTrapTestBudget.readinessCleanupMilliseconds +
+    sigtermTrapTestBudget.pendingBeforeHealMilliseconds +
+    sigtermTrapTestBudget.secondOpenMilliseconds +
+    sigtermTrapTestBudget.pendingAfterHealMilliseconds +
+    sigtermTrapTestBudget.headroomMilliseconds;
+  const sigtermTrapEditorFallbackMilliseconds = 15_000;
 
-      const doorway = createDoorway(
-        fixture.environment,
-        ["state", "programs"],
-        editorTimeoutMilliseconds,
-      );
-      const ran = await runInProcess(doorway.contract, {
-        emergencyRecord: doorway.state.emergencyRecord,
-        addons: {
-          programs: gateDomainTimeoutOnReadyFile(
-            doorway.setup.addons.programs,
-            readyFile,
-            readyTimeoutMilliseconds,
-          ),
-        },
-      })(["open", "example", "--json"]);
-      expect(existsSync(readyFile)).toBe(true);
-      expect(existsSync(sigtermFile)).toBe(true);
-      expect(ran.kind).toBe("envelope");
-      if (ran.kind !== "envelope") return;
-      expect(ran.exitCode).toBe(3);
-      expect(ran.envelope.result).toMatchObject({
-        commandIdentity: "doorway.open",
-        outcome: "failed",
-        transactionState: "unknown",
-        causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
-        data: null,
-        effects: {
-          completed: [],
-          remaining: [],
-          uncertain: ["editor.open"],
-          inventoryComplete: true,
-        },
-        handoff: {
-          owner: "operator",
-          inspect: [{ kind: "command", command: "doorway.pending", args: [] }],
-        },
-      });
+  test(
+    "ends failed and unknown when a hanging editor launcher traps SIGTERM and exits 0 after timeout, leaving an unresolved case that the next open clears",
+    async () => {
+      const fixture = createFixture();
+      try {
+        const readyFile = join(fixture.root, "editor-ready");
+        const sigtermFile = join(fixture.root, "editor-sigterm");
+        makeScript(fixture.fakeEditor, [
+          'import { writeFileSync } from "node:fs";',
+          'process.on("SIGTERM", () => {',
+          `  writeFileSync(${JSON.stringify(sigtermFile)}, "trapped");`,
+          "  process.exit(0);",
+          "});",
+          `writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
+          "setTimeout(() => {",
+          "  process.exit(1);",
+          `}, ${String(sigtermTrapEditorFallbackMilliseconds)});`,
+        ]);
 
-      const timedOutIds = readUnfinishedOperationIds(fixture.environment);
-      expect(timedOutIds).toHaveLength(1);
-      const timedOutId = timedOutIds[0];
-      if (timedOutId === undefined)
-        throw new Error("Expected timed out operationId.");
-
-      installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
-      const healed = invokeCli(
-        fixture.environment,
-        "open",
-        "example",
-        "--json",
-      );
-      expect(healed.exitCode).toBe(0);
-      expect(healed.stderr).toBe("");
-      expect(parseJson(healed.stdout)).toMatchObject({
-        result: {
+        const doorway = createDoorway(
+          fixture.environment,
+          ["state", "programs"],
+          sigtermTrapTestBudget.editorTimeoutMilliseconds,
+        );
+        const readyGate = gateDomainTimeoutOnReadyFile(
+          doorway.setup.addons.programs,
+          readyFile,
+          sigtermTrapTestBudget.readyWaitMilliseconds,
+          sigtermTrapTestBudget.readinessCleanupMilliseconds,
+        );
+        const ran = await runInProcess(doorway.contract, {
+          emergencyRecord: doorway.state.emergencyRecord,
+          addons: { programs: readyGate.addon },
+        })(["open", "example", "--json"]);
+        readyGate.throwIfNotReady();
+        expect(readyGate.domainTimeoutFired()).toBe(true);
+        expect(existsSync(readyFile)).toBe(true);
+        expect(existsSync(sigtermFile)).toBe(true);
+        expect(ran.kind).toBe("envelope");
+        if (ran.kind !== "envelope") return;
+        expect(ran.exitCode).toBe(3);
+        expect(ran.envelope.result).toMatchObject({
           commandIdentity: "doorway.open",
-          outcome: "success",
-          transactionState: "completed",
-          causeCode: "SUCCESS_COMPLETED",
-          superseded: [timedOutId],
-        },
-      });
-      expect(existsSync(fixture.editorLog)).toBe(true);
-      expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
-    } finally {
-      fixture.cleanup();
-    }
-  }, 30_000);
+          outcome: "failed",
+          transactionState: "unknown",
+          causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED",
+          data: null,
+          effects: {
+            completed: [],
+            remaining: [],
+            uncertain: ["editor.open"],
+            inventoryComplete: true,
+          },
+          handoff: {
+            owner: "operator",
+            inspect: [
+              { kind: "command", command: "doorway.pending", args: [] },
+            ],
+          },
+        });
+
+        const timedOutIds = readUnfinishedOperationIds(fixture.environment);
+        expect(timedOutIds).toHaveLength(1);
+        const timedOutId = timedOutIds[0];
+        if (timedOutId === undefined)
+          throw new Error("Expected timed out operationId.");
+
+        installLoggingEditor(fixture.fakeEditor, fixture.editorLog);
+        const healed = invokeCli(
+          fixture.environment,
+          "open",
+          "example",
+          "--json",
+        );
+        expect(healed.exitCode).toBe(0);
+        expect(healed.stderr).toBe("");
+        expect(parseJson(healed.stdout)).toMatchObject({
+          result: {
+            commandIdentity: "doorway.open",
+            outcome: "success",
+            transactionState: "completed",
+            causeCode: "SUCCESS_COMPLETED",
+            superseded: [timedOutId],
+          },
+        });
+        expect(existsSync(fixture.editorLog)).toBe(true);
+        expect(readUnfinishedOperationIds(fixture.environment)).toEqual([]);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    sigtermTrapTestTimeoutMilliseconds,
+  );
 
   test("treats a launcher result with missing programDetails as not confirmed even with exit 0 and terminationConfirmed", async () => {
     const fixture = createFixture();
