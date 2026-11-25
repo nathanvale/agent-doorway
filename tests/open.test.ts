@@ -36,6 +36,7 @@ import type {
   DoorwaySettings,
   RemoteHostSettings,
 } from "../src/settings.ts";
+import { journalFaultPreload } from "./support/journal-faults.ts";
 import { testFolder } from "./support/test-folder.ts";
 
 setDefaultTimeout(30_000);
@@ -393,45 +394,6 @@ function invokeCli(
 ) {
   return spawnCli(["run"], environment, argv);
 }
-
-const journalFaultPreload = [
-  'import { mock } from "bun:test";',
-  'import * as fs from "node:fs";',
-  "const real = { ...fs };",
-  "const faults = new Set((process.env.DOORWAY_TEST_JOURNAL_FAULTS ?? '').split(',').filter(Boolean));",
-  "const eventsDescriptors = new Set();",
-  "const unflushable = new Set();",
-  "const planted = (call) => Object.assign(new Error(`EIO: planted journal fault, ${call}`), { code: 'EIO' });",
-  "mock.module('node:fs', () => ({",
-  "  ...real,",
-  "  openSync: (path, flags, mode) => {",
-  "    const descriptor = real.openSync(path, flags, mode);",
-  "    if (String(path).endsWith('/events') && typeof flags === 'number' && (flags & real.constants.O_APPEND) !== 0) eventsDescriptors.add(descriptor);",
-  "    return descriptor;",
-  "  },",
-  "  closeSync: (descriptor) => {",
-  "    eventsDescriptors.delete(descriptor);",
-  "    unflushable.delete(descriptor);",
-  "    return real.closeSync(descriptor);",
-  "  },",
-  "  writeSync: (descriptor, bytes, ...rest) => {",
-  "    if (eventsDescriptors.has(descriptor) && (rest[0] ?? 0) === 0) {",
-  "      const kind = Buffer.from(bytes).subarray(0, 64).toString('latin1').split(' ')[1];",
-  "      if (faults.has(`${kind}:write`)) throw planted(`${kind} write`);",
-  "      if (faults.has(`${kind}:flush`)) unflushable.add(descriptor);",
-  "    }",
-  "    return real.writeSync(descriptor, bytes, ...rest);",
-  "  },",
-  "  fsyncSync: (descriptor) => {",
-  "    if (unflushable.delete(descriptor)) throw planted('flush');",
-  "    return real.fsyncSync(descriptor);",
-  "  },",
-  "  linkSync: (from, to) => {",
-  "    if (faults.has('closure:link') && String(to).endsWith('/closure')) throw planted('closure link');",
-  "    return real.linkSync(from, to);",
-  "  },",
-  "}));",
-];
 
 function invokeCliWithJournalFaults(
   fixture: ReturnType<typeof createFixture>,

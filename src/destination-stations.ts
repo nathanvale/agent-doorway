@@ -258,7 +258,7 @@ export const startStations = [
   station(causes, {
     ...stationWords,
     commandIdentity: startIdentity,
-    causeCode: "DOMAIN_DOORWAY_START_PARTIAL",
+    causeCode: "DOMAIN_DOORWAY_START_EDITOR_FAILED",
     trigger:
       "The container started and is running, but the operation stopped before launching the isolated editor.",
     repairAction:
@@ -271,7 +271,7 @@ export const startStations = [
         inspect: [pendingCommandStep],
       },
     },
-    independentObservable: `${startIdentity}:start-partial`,
+    independentObservable: `${startIdentity}:start-editor-failed`,
   }),
   station(causes, {
     ...stationWords,

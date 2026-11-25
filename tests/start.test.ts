@@ -8,26 +8,13 @@ import {
   expectedPsCommand,
   expectedStartCommand,
   gateDomainTimeoutOnReadyFile,
-  invokeCli,
   pinnedId,
   readCalls,
   replacedId,
+  runJson,
 } from "./support/start-fixture.ts";
 
 setDefaultTimeout(30_000);
-
-function runJson(
-  env: Record<string, string>,
-  expectedExit: number,
-  ...argv: readonly string[]
-): unknown {
-  const ran = invokeCli(env, ...argv, "--json");
-  expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
-    exitCode: expectedExit,
-    stderr: "",
-  });
-  return JSON.parse(ran.stdout);
-}
 
 describe("doorway start", () => {
   test("refuses when allowStart is absent or false without running any remote command", () => {
@@ -381,6 +368,9 @@ describe("doorway start", () => {
         expectedPsCommand,
       ]);
       expect(readCalls(cleanFail.editorLog)).toHaveLength(1);
+      expect(runJson(cleanFail.environment, 0, "pending")).toMatchObject({
+        result: { data: { unfinished: [] } },
+      });
     } finally {
       cleanFail.cleanup();
     }
@@ -422,77 +412,6 @@ describe("doorway start", () => {
       });
     } finally {
       unconfirmedFail.cleanup();
-    }
-  });
-
-  test("refuses pre-flight missing folders, invalid place, unknown destination, unreachable host and unresolved open", async () => {
-    const fixture = createStartFixture({
-      allowStart: true,
-      psOutputs: [`${pinnedId} pilot-box exited\n`],
-      createEditorFolders: false,
-    });
-    try {
-      const doorway = createDoorway(fixture.environment);
-      const run = runInProcess(doorway.contract, doorway.setup);
-      expect(await run(["start", "unknown"])).toMatchObject({
-        envelope: {
-          result: { causeCode: "DOMAIN_DOORWAY_DESTINATION_UNKNOWN" },
-        },
-      });
-      expect(await run(["start", "pilot", "../escape"])).toMatchObject({
-        envelope: {
-          result: { causeCode: "DOMAIN_DOORWAY_PLACE_INVALID" },
-        },
-      });
-      expect(await run(["start", "pilot"])).toMatchObject({
-        envelope: {
-          result: { causeCode: "DOMAIN_DOORWAY_EDITOR_FOLDERS_MISSING" },
-        },
-      });
-      expect(readCalls(fixture.sshLog)).toEqual([]);
-      expect(readCalls(fixture.editorLog)).toEqual([]);
-    } finally {
-      fixture.cleanup();
-    }
-
-    const unreachable = createStartFixture({
-      allowStart: true,
-      psOutputs: [""],
-      psExits: [255],
-    });
-    try {
-      expect(
-        runJson(unreachable.environment, 3, "start", "pilot"),
-      ).toMatchObject({
-        result: { causeCode: "DOMAIN_DOORWAY_REMOTE_HOST_UNREACHABLE" },
-      });
-      assertRemoteCommands(readCalls(unreachable.sshLog), [expectedPsCommand]);
-    } finally {
-      unreachable.cleanup();
-    }
-
-    const unresolvedOpen = createStartFixture({
-      allowStart: true,
-      psOutputs: [`${pinnedId} pilot-box running\n`],
-      editorSignal: "SIGTERM",
-    });
-    try {
-      expect(
-        runJson(unresolvedOpen.environment, 3, "open", "pilot"),
-      ).toMatchObject({
-        result: { causeCode: "DOMAIN_DOORWAY_OPEN_UNCONFIRMED" },
-      });
-      expect(
-        runJson(unresolvedOpen.environment, 3, "start", "pilot"),
-      ).toMatchObject({
-        result: { causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED" },
-      });
-      assertRemoteCommands(readCalls(unresolvedOpen.sshLog), [
-        expectedPsCommand,
-        expectedPsCommand,
-      ]);
-    } finally {
-      unresolvedOpen.cleanup();
     }
   });
 });

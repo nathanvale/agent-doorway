@@ -18,6 +18,7 @@ import type {
   DoorwaySettings,
   RemoteHostSettings,
 } from "../../src/settings.ts";
+import { journalFaultPreload } from "./journal-faults.ts";
 import { testFolder } from "./test-folder.ts";
 
 const cliEntry = join(import.meta.dir, "../../src/cli.ts");
@@ -103,16 +104,20 @@ export function assertRemoteCommands(
   }
 }
 
-export function invokeCli(
+function spawnCli(
+  runtimeArgs: readonly string[],
   environment: Record<string, string>,
-  ...argv: readonly string[]
+  argv: readonly string[],
 ) {
-  const ran = Bun.spawnSync([process.execPath, "run", cliEntry, ...argv], {
-    env: environment,
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 20_000,
-  });
+  const ran = Bun.spawnSync(
+    [process.execPath, ...runtimeArgs, cliEntry, ...argv],
+    {
+      env: environment,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 20_000,
+    },
+  );
   return {
     exitCode: ran.exitCode,
     stdout: ran.stdout.toString(),
@@ -120,7 +125,78 @@ export function invokeCli(
   };
 }
 
-function waitForFile(filePath: string, timeoutMs = 10_000): Promise<void> {
+function invokeCli(
+  environment: Record<string, string>,
+  ...argv: readonly string[]
+) {
+  return spawnCli(["run"], environment, argv);
+}
+
+export function runJson(
+  environment: Record<string, string>,
+  expectedExit: number,
+  ...argv: readonly string[]
+): unknown {
+  const ran = invokeCli(environment, ...argv, "--json");
+  expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+    exitCode: expectedExit,
+    stderr: "",
+  });
+  return JSON.parse(ran.stdout);
+}
+
+export function spawnCliAsync(
+  environment: Record<string, string>,
+  ...argv: readonly string[]
+) {
+  return Bun.spawn([process.execPath, "run", cliEntry, ...argv], {
+    env: environment,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
+export async function waitForExitOrKill(
+  child: ReturnType<typeof spawnCliAsync>,
+  timeoutMs = 15_000,
+): Promise<number> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      child.exited,
+      new Promise<number>((_, reject) => {
+        timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(
+            new Error(`Timed out waiting for child PID ${String(child.pid)}.`),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export function invokeCliWithJournalFaults(
+  root: string,
+  environment: Record<string, string>,
+  faults: string,
+  ...argv: readonly string[]
+) {
+  const preload = join(root, "journal-faults.ts");
+  writeFileSync(preload, [...journalFaultPreload, ""].join("\n"));
+  return spawnCli(
+    ["run", "--preload", preload],
+    { ...environment, DOORWAY_TEST_JOURNAL_FAULTS: faults },
+    argv,
+  );
+}
+
+export function waitForFile(
+  filePath: string,
+  timeoutMs = 10_000,
+): Promise<void> {
   if (existsSync(filePath)) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const interval = setInterval(() => {
@@ -212,9 +288,11 @@ export type StartFixtureOptions = {
   readonly psExits?: readonly number[];
   readonly startExit?: number;
   readonly startHang?: boolean;
+  readonly startWaitForRelease?: boolean;
   readonly editorExit?: number;
   readonly editorSignal?: NodeJS.Signals;
   readonly createEditorFolders?: boolean;
+  readonly editorToolPath?: string;
 };
 
 export function createStartFixture(options: StartFixtureOptions) {
@@ -222,6 +300,7 @@ export function createStartFixture(options: StartFixtureOptions) {
   const sshLog = join(root, "ssh-calls.jsonl");
   const editorLog = join(root, "editor-calls.jsonl");
   const startReadyFile = join(root, "start-ready");
+  const startReleaseFile = join(root, "start-release");
   const psCounter = join(root, "ps-count.txt");
   const userDataFolder = join(root, "editor-user-data");
   const extensionsFolder = join(root, "editor-extensions");
@@ -245,7 +324,27 @@ export function createStartFixture(options: StartFixtureOptions) {
           "  setInterval(() => {}, 60_000);",
           "  await new Promise(() => {});",
         ]
-      : [`  process.exit(${String(options.startExit ?? 0)});`]),
+      : options.startWaitForRelease === true
+        ? [
+            `  writeFileSync(${JSON.stringify(startReadyFile)}, String(process.pid));`,
+            `  if (!existsSync(${JSON.stringify(startReleaseFile)})) {`,
+            "    await new Promise((resolve, reject) => {",
+            "      const interval = setInterval(() => {",
+            `        if (existsSync(${JSON.stringify(startReleaseFile)})) {`,
+            "          clearInterval(interval);",
+            "          clearTimeout(timer);",
+            "          resolve(undefined);",
+            "        }",
+            "      }, 20);",
+            "      const timer = setTimeout(() => {",
+            "        clearInterval(interval);",
+            '        reject(new Error("Timed out waiting for start release file."));',
+            "      }, 15_000);",
+            "    });",
+            "  }",
+            `  process.exit(${String(options.startExit ?? 0)});`,
+          ]
+        : [`  process.exit(${String(options.startExit ?? 0)});`]),
     "}",
     `const psOutputs = ${JSON.stringify(options.psOutputs)};`,
     `const psExits = ${JSON.stringify(options.psExits ?? [])};`,
@@ -285,7 +384,10 @@ export function createStartFixture(options: StartFixtureOptions) {
     editor: { userDataFolder, extensionsFolder },
     remoteHosts: [sampleHost],
     destinations: [destination],
-    tools: { ssh: fakeSsh, editor: fakeEditor },
+    tools: {
+      ssh: fakeSsh,
+      editor: options.editorToolPath ?? fakeEditor,
+    },
   };
   const settingsFile = join(root, "settings.json");
   const stateFolder = join(root, "state");
@@ -303,6 +405,8 @@ export function createStartFixture(options: StartFixtureOptions) {
     sshLog,
     editorLog,
     startReadyFile,
+    startReleaseFile,
+    settingsFile,
     stateFolder,
     environment,
     cleanup: () => rmSync(root, { recursive: true, force: true }),

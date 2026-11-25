@@ -37,7 +37,7 @@ export const causes = {
   DOMAIN_DOORWAY_DESTINATION_HELD: refusedHandoff,
   DOMAIN_DOORWAY_DESTINATION_UNRESOLVED: refusedHandoff,
   DOMAIN_DOORWAY_STATE_UNAVAILABLE: refusedHandoff,
-  DOMAIN_DOORWAY_START_PARTIAL: {
+  DOMAIN_DOORWAY_START_EDITOR_FAILED: {
     outcome: "failed",
     transactionState: "partially-completed",
     failureClass: "domain",
