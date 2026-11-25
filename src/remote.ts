@@ -14,6 +14,13 @@ export type InventoryParse = {
 
 export type DestinationState = "running" | "stopped" | "replaced" | "missing";
 
+export type ObservedDestination =
+  | {
+      readonly state: "running" | "stopped";
+      readonly container: ObservedContainer;
+    }
+  | { readonly state: "replaced" | "missing"; readonly container: undefined };
+
 const idPattern = /^[0-9a-f]{64}$/;
 const namePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const statePattern = /^[a-z]{1,16}$/;
@@ -35,6 +42,25 @@ export function inventoryCommand(remoteHost: RemoteHostSettings): string {
   ]
     .map(quoteShell)
     .join(" ");
+}
+
+export function startContainerCommand(
+  remoteHost: RemoteHostSettings,
+  containerId: string,
+): string {
+  return [
+    remoteHost.dockerPath,
+    "--host",
+    remoteHost.dockerEndpoint,
+    "start",
+    containerId,
+  ]
+    .map(quoteShell)
+    .join(" ");
+}
+
+export function isStartableState(dockerState: string): boolean {
+  return dockerState === "exited" || dockerState === "created";
 }
 
 export function sshArguments(
@@ -100,20 +126,31 @@ export function parseInventory(stdout: string): InventoryParse {
   return { containers, rejected };
 }
 
-export function destinationState(
+export function observeDestination(
   destination: DestinationSettings,
   containers: readonly ObservedContainer[],
-): DestinationState {
+): ObservedDestination {
   const byName = containers.find((container) =>
     container.names.includes(destination.container),
   );
   if (byName !== undefined) {
-    if (byName.id !== destination.containerId) return "replaced";
-    return byName.running ? "running" : "stopped";
+    if (byName.id !== destination.containerId)
+      return { state: "replaced", container: undefined };
+    return {
+      state: byName.running ? "running" : "stopped",
+      container: byName,
+    };
   }
   const byId = containers.find(
     (container) => container.id === destination.containerId,
   );
-  if (byId !== undefined) return "replaced";
-  return "missing";
+  if (byId !== undefined) return { state: "replaced", container: undefined };
+  return { state: "missing", container: undefined };
+}
+
+export function destinationState(
+  destination: DestinationSettings,
+  containers: readonly ObservedContainer[],
+): DestinationState {
+  return observeDestination(destination, containers).state;
 }
