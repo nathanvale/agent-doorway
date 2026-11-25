@@ -15,6 +15,7 @@ import { pendingCommand } from "./pending.ts";
 import type { DoorwayState } from "./pending.ts";
 import { statePath } from "./settings.ts";
 import type { Environment } from "./settings.ts";
+import { startCommand } from "./start.ts";
 
 const status = command({
   identity: "doorway.status",
@@ -47,6 +48,7 @@ function buildCommands(
     status,
     listCommand(environment, parsePath),
     openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
+    startCommand(state, environment, parsePath, editorTimeoutMilliseconds),
     pendingCommand(state, stateFolder, environment),
   ] as const;
 }

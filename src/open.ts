@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import { changing, station } from "agent-cli-kernel";
 import type { ParsedPath, ProgramResult } from "agent-cli-kernel";
 import { programDetails } from "agent-cli-kernel/addons/programs";
@@ -6,51 +5,30 @@ import type { Refusal } from "agent-cli-kernel/addons/state";
 import {
   causes,
   completedSuccess,
-  noInput,
   nothingChanged,
   stationWords,
 } from "./causes.ts";
-import { editorArguments, requiredEditorFolders } from "./editor.ts";
 import {
-  envExecutablePath,
-  executableExists,
-  isolatedProgram,
-} from "./env-program.ts";
+  buildEditorCall,
+  defaultEditorTimeoutMilliseconds,
+  destinationInput,
+  errorMessage,
+  inspectPending,
+  pendingCommandStep,
+  prepareDestination,
+  probeHostInventory,
+  programStoppedCleanly,
+  refusalDetail,
+  refusedTransactionResult,
+  runEditorProgram,
+  supersededNote,
+} from "./destination-launch.ts";
+import { commonDestinationStations } from "./destination-stations.ts";
 import type { DoorwayState } from "./pending.ts";
-import {
-  destinationState,
-  inventoryCommand,
-  parseInventory,
-  sshArguments,
-} from "./remote.ts";
-import { loadDoorwaySettings } from "./settings-load.ts";
-import {
-  findDestination,
-  homeOf,
-  isSafeRemotePath,
-  toolPath,
-  unavailableStateMessage,
-} from "./settings.ts";
+import { destinationState } from "./remote.ts";
 import type { Environment } from "./settings.ts";
 
 const identity = "doorway.open";
-const remoteTimeoutMilliseconds = 30_000;
-const defaultEditorTimeoutMilliseconds = 60_000;
-const programOutputLimitBytes = 1_048_576;
-const programShutdownMilliseconds = 1_000;
-
-const pendingCommandStep = {
-  kind: "command",
-  command: "doorway.pending",
-  args: [],
-} as const;
-
-const inspectPending = {
-  owner: "operator",
-  reason:
-    "Inspect doorway pending before deciding how to proceed with this destination.",
-  inspect: [pendingCommandStep],
-} as const;
 
 const destinationHeldHandoff = {
   owner: "operator",
@@ -73,71 +51,6 @@ const openUnconfirmedHandoff = {
   inspect: [pendingCommandStep],
 } as const;
 
-async function foldersExist(paths: readonly string[]): Promise<boolean> {
-  for (const folder of paths) {
-    const info = await stat(folder).catch(() => null);
-    if (info === null || !info.isDirectory()) return false;
-  }
-  return true;
-}
-
-type StateRefusal = {
-  readonly causeCode:
-    | "DOMAIN_DOORWAY_DESTINATION_HELD"
-    | "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED"
-    | "DOMAIN_DOORWAY_STATE_UNAVAILABLE";
-  readonly message: string;
-};
-
-function stateRefusal(outcome: Refusal, destinationName: string): StateRefusal {
-  switch (outcome.kind) {
-    case "held-lock":
-      return {
-        causeCode: "DOMAIN_DOORWAY_DESTINATION_HELD",
-        message: `Destination ${destinationName} is still held by running operation ${outcome.operationId}. Wait for it to finish or stop, then run doorway open again.`,
-      };
-    case "unresolved-case":
-      return {
-        causeCode: "DOMAIN_DOORWAY_DESTINATION_UNRESOLVED",
-        message: `Destination ${destinationName} has an unfinished operation ${outcome.operationId} that doorway open cannot clear automatically (for example, a torn journal record, a damaged closure, a different command, or an uncovered scope).`,
-      };
-    case "unavailable":
-      return {
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-        message: `Doorway state is unavailable: ${outcome.reason}${outcome.detail === undefined ? "" : ` (${outcome.detail})`}.`,
-      };
-    case "busy":
-    case "denied":
-    case "approval-lost":
-    case "approval-unavailable":
-      return {
-        causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-        message: `Doorway state refused coordination: ${outcome.kind}.`,
-      };
-  }
-}
-
-function supersededNote(superseded: readonly string[] | undefined): string {
-  if (superseded === undefined || superseded.length === 0) return "";
-  const label =
-    superseded.length === 1
-      ? "earlier unfinished operation"
-      : "earlier unfinished operations";
-  return ` Cleared ${label}: ${superseded.join(", ")}.`;
-}
-
-function refusedSupersededNote(
-  superseded: readonly string[] | undefined,
-): string {
-  const cleared = supersededNote(superseded);
-  if (cleared === "") return "";
-  return `${cleared} Run doorway pending to inspect.`;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 type UnknownOpen = {
   readonly name: string;
   readonly effects: {
@@ -150,18 +63,8 @@ type UnknownOpen = {
   readonly editorResult: ProgramResult | undefined;
 };
 
-function refusalDetail(refusal: Refusal): string {
-  const about =
-    refusal.kind === "unavailable"
-      ? `, ${refusal.reason}`
-      : refusal.kind === "held-lock" || refusal.kind === "unresolved-case"
-        ? `, ${refusal.operationId}`
-        : "";
-  return `doorway state refused the open (${refusal.kind}${about})`;
-}
-
 function unknownDetail(open: UnknownOpen): string {
-  if (open.refusal !== undefined) return refusalDetail(open.refusal);
+  if (open.refusal !== undefined) return refusalDetail(open.refusal, "open");
   if (open.failureDetail !== "") return open.failureDetail;
   return open.editorResult !== undefined &&
     programDetails(open.editorResult)?.timedOut === true
@@ -186,16 +89,6 @@ function unconfirmedMessage(open: UnknownOpen): string {
   return `${editorSentence(open)}${journal}`;
 }
 
-function editorStoppedCleanly(result: ProgramResult): boolean {
-  const details = programDetails(result);
-  return (
-    result.terminationConfirmed &&
-    details !== undefined &&
-    !details.timedOut &&
-    result.exitCode !== null
-  );
-}
-
 export function openCommand(
   state: DoorwayState,
   environment: Environment,
@@ -206,36 +99,7 @@ export function openCommand(
     identity,
     route: ["open"],
     summary: "Recheck a destination, then open a place in the isolated editor.",
-    input: {
-      ...noInput,
-      arguments: [
-        {
-          name: "destination",
-          summary: "Name of the destination in settings.",
-          required: true,
-          value: {
-            kind: "string",
-            minLength: 1,
-            maxLength: 128,
-            choices: null,
-            pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
-          },
-        },
-        {
-          name: "place",
-          summary:
-            "Optional absolute remote path inside the destination; defaults to the destination folder.",
-          required: false,
-          value: {
-            kind: "string",
-            minLength: 1,
-            maxLength: 512,
-            choices: null,
-            pattern: null,
-          },
-        },
-      ],
-    },
+    input: destinationInput,
     capabilities: { programs: true },
     effectClass: "external",
     effects: ["editor.open"],
@@ -253,162 +117,7 @@ export function openCommand(
         guidance: { next: { kind: "done" } },
         independentObservable: `${identity}:opened`,
       }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-        trigger:
-          "The doorway settings file does not exist, or a settings file is left only at the old default place outside my-agent-dojo.",
-        repairAction:
-          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file. When the message names an old settings file, run the move command it gives; doorway never reads or moves the old file itself.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Create the settings file, set DOORWAY_SETTINGS, or run the move command in the message, then run doorway open again.",
-          },
-        },
-        independentObservable: `${identity}:settings-missing`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_SETTINGS_INVALID",
-        trigger:
-          "The doorway settings file is invalid JSON or fails schema validation.",
-        repairAction:
-          "Fix the settings file reported in the message, then run doorway open again.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Repair the settings file and run doorway open again.",
-          },
-        },
-        independentObservable: `${identity}:settings-invalid`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_DESTINATION_UNKNOWN",
-        trigger: "No destination with that name is declared in settings.",
-        repairAction:
-          "Use a destination name declared in the doorway settings file.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Check the destination names in settings and run doorway open again.",
-          },
-        },
-        independentObservable: `${identity}:destination-unknown`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_PLACE_INVALID",
-        trigger: "The requested place is not a safe absolute remote path.",
-        repairAction:
-          "Provide an absolute remote path with safe characters and no parent segments.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Pass a safe absolute remote path as the place argument.",
-          },
-        },
-        independentObservable: `${identity}:place-invalid`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_EDITOR_FOLDERS_MISSING",
-        trigger:
-          "The isolated editor user-data or extensions folder does not exist.",
-        repairAction:
-          "Create the isolated editor folders declared in settings before running doorway open.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Create the declared isolated editor folders and try again.",
-          },
-        },
-        independentObservable: `${identity}:editor-folders-missing`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_TOOL_UNAVAILABLE",
-        trigger:
-          "A required local program for SSH, env, or the isolated editor is missing or not executable.",
-        repairAction:
-          "Install the missing program or update the tools path in doorway settings.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Ensure ssh, env, and the isolated editor program are executable, then try again.",
-          },
-        },
-        independentObservable: `${identity}:tool-unavailable`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_REMOTE_HOST_UNREACHABLE",
-        trigger: "The remote host could not be reached over SSH.",
-        repairAction:
-          "Check network reachability and SSH access to the remote host, then try again.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Verify SSH reachability to the remote host and retry doorway open.",
-          },
-        },
-        independentObservable: `${identity}:remote-host-unreachable`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_REMOTE_COMMAND_FAILED",
-        trigger:
-          "The read-only Docker inventory command failed on the remote host.",
-        repairAction:
-          "Verify Docker is running at the remote host dockerEndpoint and dockerPath.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Check Docker availability on the remote host and retry doorway open.",
-          },
-        },
-        independentObservable: `${identity}:remote-command-failed`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_DESTINATION_MISSING",
-        trigger: "The destination container was not found on its remote host.",
-        repairAction:
-          "Check the container name on the remote host; doorway open never creates containers.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Verify the destination container exists on its remote host.",
-          },
-        },
-        independentObservable: `${identity}:destination-missing`,
-      }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_DESTINATION_REPLACED",
-        trigger:
-          "The container on the remote host does not match the destination pinned container identity.",
-        repairAction:
-          "Review the container on the remote host and update the pinned containerId in settings if intended.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Inspect the remote container identity before updating settings.",
-          },
-        },
-        independentObservable: `${identity}:destination-replaced`,
-      }),
+      ...commonDestinationStations(identity, "doorway open"),
       station(causes, {
         ...stationWords,
         commandIdentity: identity,
@@ -494,133 +203,35 @@ export function openCommand(
       }),
     ],
     run: async (input, context) => {
-      const stateProblem = unavailableStateMessage(environment);
-      if (stateProblem !== undefined)
+      const prep = await prepareDestination(environment, input);
+      if (!prep.ok && prep.causeCode !== "DOMAIN_DOORWAY_START_NOT_ALLOWED")
+        return context.result(
+          { commandIdentity: identity, causeCode: prep.causeCode },
+          { message: prep.message, data: null, effects: nothingChanged },
+        );
+      if (!prep.ok)
         return context.result(
           {
             commandIdentity: identity,
             causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
           },
-          { message: stateProblem, data: null, effects: nothingChanged },
-        );
-      const loaded = await loadDoorwaySettings(environment);
-      if (!loaded.ok)
-        return context.result(
-          { commandIdentity: identity, causeCode: loaded.causeCode },
-          {
-            message: loaded.message,
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-      const found = findDestination(loaded.settings, input.destination);
-      if (found === undefined)
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_DESTINATION_UNKNOWN",
-          },
-          {
-            message: `No destination named ${input.destination} is declared in settings.`,
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-      if (input.place !== undefined && !isSafeRemotePath(input.place))
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_PLACE_INVALID",
-          },
-          {
-            message: `The place ${input.place} is not a safe absolute remote path.`,
-            data: null,
-            effects: nothingChanged,
-          },
+          { message: prep.message, data: null, effects: nothingChanged },
         );
 
-      const { destination, remoteHost } = found;
-      const home = homeOf(environment);
-      const editorFolders = requiredEditorFolders(loaded.settings, home);
-      if (editorFolders === undefined || !(await foldersExist(editorFolders)))
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_EDITOR_FOLDERS_MISSING",
-          },
-          {
-            message:
-              "One or more isolated editor folders do not exist on this machine.",
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-
-      const sshExecutable = toolPath(loaded.settings, "ssh", home);
-      const editorExecutable = toolPath(loaded.settings, "editor", home);
-      if (
-        sshExecutable === undefined ||
-        editorExecutable === undefined ||
-        !(await executableExists(envExecutablePath)) ||
-        !(await executableExists(sshExecutable)) ||
-        !(await executableExists(editorExecutable))
-      )
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_TOOL_UNAVAILABLE",
-          },
-          {
-            message:
-              "A required local program (env, ssh, or the isolated editor) is missing or not executable.",
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-
-      const sshCall = isolatedProgram(
-        parsePath(sshExecutable),
-        sshArguments(remoteHost, inventoryCommand(remoteHost)),
+      const { destination, remoteHost, sshExecutable } = prep.prepared;
+      const inventory = await probeHostInventory(
+        context.programs,
+        sshExecutable,
         parsePath,
+        remoteHost,
       );
-      const sshRan = await context.programs.inspect({
-        executable: sshCall.executable,
-        args: sshCall.args,
-        timeoutMilliseconds: remoteTimeoutMilliseconds,
-        outputLimitBytes: programOutputLimitBytes,
-        shutdownMilliseconds: programShutdownMilliseconds,
-      });
-      if (
-        programDetails(sshRan)?.timedOut === true ||
-        sshRan.exitCode === 255 ||
-        sshRan.exitCode === null
-      )
+      if (!inventory.ok)
         return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_REMOTE_HOST_UNREACHABLE",
-          },
-          {
-            message: `Remote host ${remoteHost.name} could not be reached over SSH.`,
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-      if (sshRan.exitCode !== 0)
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_REMOTE_COMMAND_FAILED",
-          },
-          {
-            message: `Docker inventory failed on remote host ${remoteHost.name} with exit code ${String(sshRan.exitCode)}.`,
-            data: null,
-            effects: nothingChanged,
-          },
+          { commandIdentity: identity, causeCode: inventory.causeCode },
+          { message: inventory.message, data: null, effects: nothingChanged },
         );
 
-      const observed = parseInventory(sshRan.stdout);
-      const currentState = destinationState(destination, observed.containers);
+      const currentState = destinationState(destination, inventory.containers);
       if (currentState === "missing")
         return context.result(
           {
@@ -658,18 +269,7 @@ export function openCommand(
           },
         );
 
-      const plan = editorArguments(
-        loaded.settings,
-        remoteHost,
-        destination,
-        home,
-        input.place,
-      );
-      const editorCall = isolatedProgram(
-        parsePath(editorExecutable),
-        plan.args,
-        parsePath,
-      );
+      const editor = buildEditorCall(prep.prepared, parsePath, input.place);
       let editorResult: ProgramResult | undefined;
       let failureDetail = "";
       const outcome = await state.transaction(
@@ -682,7 +282,7 @@ export function openCommand(
           facts: {
             destination: destination.name,
             containerId: destination.containerId,
-            place: plan.place,
+            place: editor.place,
           },
           supersedeUnresolved: true,
         },
@@ -692,13 +292,12 @@ export function openCommand(
               "editor.open",
               async (effect) => {
                 try {
-                  const ran = await context.programs.domain(effect).start({
-                    executable: editorCall.executable,
-                    args: editorCall.args,
-                    timeoutMilliseconds: editorTimeoutMilliseconds,
-                    outputLimitBytes: programOutputLimitBytes,
-                    shutdownMilliseconds: programShutdownMilliseconds,
-                  });
+                  const ran = await runEditorProgram(
+                    context.programs,
+                    effect,
+                    editor.call,
+                    editorTimeoutMilliseconds,
+                  );
                   editorResult = ran;
                   return ran;
                 } catch (error) {
@@ -706,7 +305,7 @@ export function openCommand(
                   throw error;
                 }
               },
-              (ran) => Promise.resolve(editorStoppedCleanly(ran)),
+              (ran) => Promise.resolve(programStoppedCleanly(ran)),
             );
           } catch (error) {
             if (failureDetail === "") failureDetail = errorMessage(error);
@@ -737,32 +336,20 @@ export function openCommand(
         );
       if (outcome.proof.transactionState === "unknown") return unconfirmed();
 
-      const clearedOnRefusal = refusedSupersededNote(outcome.superseded);
-      if (outcome.kind !== "ran") {
-        const refused = stateRefusal(outcome, destination.name);
+      const refused = refusedTransactionResult(
+        outcome,
+        destination.name,
+        "doorway open",
+        "starting the isolated editor",
+        failureDetail,
+      );
+      if (refused !== undefined)
         return context.result(
           { commandIdentity: identity, causeCode: refused.causeCode },
           {
-            message: `${refused.message}${clearedOnRefusal}`,
+            message: refused.message,
             data: null,
-            effects:
-              outcome.proof.transactionState === "unchanged"
-                ? outcome.proof.effects
-                : nothingChanged,
-          },
-        );
-      }
-
-      if (outcome.proof.transactionState === "unchanged")
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-          },
-          {
-            message: `Doorway state could not record ${destination.name} before starting the isolated editor${failureDetail === "" ? "" : `: ${failureDetail}`}.${clearedOnRefusal}`,
-            data: null,
-            effects: outcome.proof.effects,
+            effects: refused.effects,
           },
         );
 
@@ -789,13 +376,13 @@ export function openCommand(
       return context.result(
         { commandIdentity: identity, causeCode: completedSuccess },
         {
-          message: `Opened ${destination.name} at ${plan.place} in the isolated editor. Attachment was not verified; closing the editor leaves the container running.${cleared}`,
+          message: `Opened ${destination.name} at ${editor.place} in the isolated editor. Attachment was not verified; closing the editor leaves the container running.${cleared}`,
           data: {
             destination: destination.name,
             remoteHost: remoteHost.name,
             container: destination.container,
             containerId: destination.containerId,
-            place: plan.place,
+            place: editor.place,
             editor: "isolated-vscode",
           },
           transaction: outcome.proof,

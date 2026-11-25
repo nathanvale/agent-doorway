@@ -35,7 +35,7 @@ export function pendingCommand(
         guidance: {
           next: {
             kind: "instruction",
-            text: "An unfinished doorway open clears on the next open for that destination once the earlier run has stopped. A live run still refuses as held; a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.",
+            text: "An unfinished doorway open or start clears on the next open or start for that destination once the earlier run has stopped. A live run still refuses as held; a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.",
           },
         },
         independentObservable: `${identity}:listed`,
@@ -112,7 +112,7 @@ export function pendingCommand(
           message:
             count === 0
               ? "0 unfinished operations."
-              : `${String(count)} unfinished ${count === 1 ? "operation" : "operations"}. An unfinished doorway open clears on the next open for that destination once the earlier run has stopped; a live run still refuses as held, and a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.`,
+              : `${String(count)} unfinished ${count === 1 ? "operation" : "operations"}. An unfinished doorway open or start clears on the next open or start for that destination once the earlier run has stopped; a live run still refuses as held, and a torn journal record, damaged closure, different command, or uncovered scope still refuses as unresolved.`,
           data: {
             stateFolder,
             unfinished: report.unfinished.map((entry) => ({

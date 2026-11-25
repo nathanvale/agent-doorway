@@ -53,6 +53,7 @@ test("help identifies the CLI as doorway and lists its doorway commands", () => 
     expect(stdout).toContain("list (doorway.list)");
     expect(stdout).toContain("open (doorway.open)");
     expect(stdout).toContain("pending (doorway.pending)");
+    expect(stdout).toContain("start (doorway.start)");
     expect(stdout).toContain("status (doorway.status)");
     expect(stdout).not.toContain("agent-doorway");
   } finally {
