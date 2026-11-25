@@ -1,6 +1,5 @@
 import { command, station } from "agent-cli-kernel";
 import type { ParsedPath, ProgramsCapability } from "agent-cli-kernel";
-import { programDetails } from "agent-cli-kernel/addons/programs";
 import {
   causes,
   noInput,
@@ -16,7 +15,7 @@ import {
 import {
   destinationState,
   inventoryCommand,
-  parseInventory,
+  readInventoryResult,
   sshArguments,
 } from "./remote.ts";
 import type { DestinationState, ObservedContainer } from "./remote.ts";
@@ -142,14 +141,17 @@ function unconfiguredRows(
     const configured = settings.destinations.filter(
       (destination) => destination.remoteHost === host.name,
     );
-    const knownNames = new Set(configured.map((item) => item.container));
-    const knownIds = new Set(configured.map((item) => item.containerId));
+    const representedIds = new Set(
+      configured.flatMap((destination) => {
+        const observed = observedContainerFor(
+          destination,
+          hostInventory.containers,
+        );
+        return observed === undefined ? [] : [observed.id];
+      }),
+    );
     for (const container of hostInventory.containers) {
-      if (
-        knownIds.has(container.id) ||
-        container.names.some((name) => knownNames.has(name))
-      )
-        continue;
+      if (representedIds.has(container.id)) continue;
       extra.push({
         kind: "unconfigured",
         destination: null,
@@ -191,39 +193,46 @@ async function inspectHost(
     outputLimitBytes: programOutputLimitBytes,
     shutdownMilliseconds: programShutdownMilliseconds,
   });
-  if (
-    programDetails(sshRan)?.timedOut === true ||
-    sshRan.exitCode === 255 ||
-    sshRan.exitCode === null
-  ) {
-    return {
-      status: "unreachable",
-      name: remoteHost.name,
-      label: remoteHost.label,
-      containers: [],
-      rejectedRows: 0,
-      error: `Remote host ${remoteHost.name} could not be reached over SSH.`,
-    };
+  const outcome = readInventoryResult(sshRan);
+  switch (outcome.status) {
+    case "ok":
+      return {
+        status: "ok",
+        name: remoteHost.name,
+        label: remoteHost.label,
+        containers: outcome.containers,
+        rejectedRows: outcome.rejected,
+        error: null,
+      };
+    case "timed-out":
+    case "unreachable":
+      return {
+        status: "unreachable",
+        name: remoteHost.name,
+        label: remoteHost.label,
+        containers: [],
+        rejectedRows: 0,
+        error: `Remote host ${remoteHost.name} could not be reached over SSH.`,
+      };
+    case "command-failed":
+      return {
+        status: "command-failed",
+        name: remoteHost.name,
+        label: remoteHost.label,
+        containers: [],
+        rejectedRows: 0,
+        error: `Docker inventory failed on remote host ${remoteHost.name} with exit code ${String(outcome.exitCode)}.`,
+      };
+    case "truncated":
+      return {
+        status: "command-failed",
+        name: remoteHost.name,
+        label: remoteHost.label,
+        containers: [],
+        rejectedRows: 0,
+        error: `Docker inventory output from remote host ${remoteHost.name} was truncated at the output limit.`,
+      };
   }
-  if (sshRan.exitCode !== 0) {
-    return {
-      status: "command-failed",
-      name: remoteHost.name,
-      label: remoteHost.label,
-      containers: [],
-      rejectedRows: 0,
-      error: `Docker inventory failed on remote host ${remoteHost.name} with exit code ${String(sshRan.exitCode)}.`,
-    };
-  }
-  const observed = parseInventory(sshRan.stdout);
-  return {
-    status: "ok",
-    name: remoteHost.name,
-    label: remoteHost.label,
-    containers: observed.containers,
-    rejectedRows: observed.rejected,
-    error: null,
-  };
 }
 
 function summaryMessage(

@@ -1,3 +1,5 @@
+import type { ProgramResult } from "agent-cli-kernel";
+import { programDetails } from "agent-cli-kernel/addons/programs";
 import type { DestinationSettings, RemoteHostSettings } from "./settings.ts";
 
 export type ObservedContainer = {
@@ -11,6 +13,17 @@ export type InventoryParse = {
   readonly containers: readonly ObservedContainer[];
   readonly rejected: number;
 };
+
+export type InventoryOutcome =
+  | {
+      readonly status: "ok";
+      readonly containers: readonly ObservedContainer[];
+      readonly rejected: number;
+    }
+  | { readonly status: "timed-out" }
+  | { readonly status: "unreachable" }
+  | { readonly status: "command-failed"; readonly exitCode: number }
+  | { readonly status: "truncated" };
 
 export type DestinationState = "running" | "stopped" | "replaced" | "missing";
 
@@ -124,6 +137,23 @@ export function parseInventory(stdout: string): InventoryParse {
     });
   }
   return { containers, rejected };
+}
+
+export function readInventoryResult(result: ProgramResult): InventoryOutcome {
+  const details = programDetails(result);
+  if (details?.timedOut === true) return { status: "timed-out" };
+  if (result.exitCode === 255 || result.exitCode === null)
+    return { status: "unreachable" };
+  if (result.exitCode !== 0)
+    return { status: "command-failed", exitCode: result.exitCode };
+  if ((details?.stdoutTruncated ?? result.outputTruncated) === true)
+    return { status: "truncated" };
+  const parsed = parseInventory(result.stdout);
+  return {
+    status: "ok",
+    containers: parsed.containers,
+    rejected: parsed.rejected,
+  };
 }
 
 export function observeDestination(

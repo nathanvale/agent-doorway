@@ -14,7 +14,11 @@ import {
   executableExists,
   isolatedProgram,
 } from "./env-program.ts";
-import { inventoryCommand, parseInventory, sshArguments } from "./remote.ts";
+import {
+  inventoryCommand,
+  readInventoryResult,
+  sshArguments,
+} from "./remote.ts";
 import type { ObservedContainer } from "./remote.ts";
 import { loadDoorwaySettings } from "./settings-load.ts";
 import {
@@ -224,23 +228,30 @@ export async function probeHostInventory(
     outputLimitBytes: programOutputLimitBytes,
     shutdownMilliseconds: programShutdownMilliseconds,
   });
-  if (
-    programDetails(sshRan)?.timedOut === true ||
-    sshRan.exitCode === 255 ||
-    sshRan.exitCode === null
-  )
-    return {
-      ok: false,
-      causeCode: "DOMAIN_DOORWAY_REMOTE_HOST_UNREACHABLE",
-      message: `Remote host ${remoteHost.name} could not be reached over SSH.`,
-    };
-  if (sshRan.exitCode !== 0)
-    return {
-      ok: false,
-      causeCode: "DOMAIN_DOORWAY_REMOTE_COMMAND_FAILED",
-      message: `Docker inventory failed on remote host ${remoteHost.name} with exit code ${String(sshRan.exitCode)}.`,
-    };
-  return { ok: true, containers: parseInventory(sshRan.stdout).containers };
+  const outcome = readInventoryResult(sshRan);
+  switch (outcome.status) {
+    case "ok":
+      return { ok: true, containers: outcome.containers };
+    case "timed-out":
+    case "unreachable":
+      return {
+        ok: false,
+        causeCode: "DOMAIN_DOORWAY_REMOTE_HOST_UNREACHABLE",
+        message: `Remote host ${remoteHost.name} could not be reached over SSH.`,
+      };
+    case "command-failed":
+      return {
+        ok: false,
+        causeCode: "DOMAIN_DOORWAY_REMOTE_COMMAND_FAILED",
+        message: `Docker inventory failed on remote host ${remoteHost.name} with exit code ${String(outcome.exitCode)}.`,
+      };
+    case "truncated":
+      return {
+        ok: false,
+        causeCode: "DOMAIN_DOORWAY_REMOTE_COMMAND_FAILED",
+        message: `Docker inventory output from remote host ${remoteHost.name} was truncated at the output limit.`,
+      };
+  }
 }
 
 export function buildEditorCall(
