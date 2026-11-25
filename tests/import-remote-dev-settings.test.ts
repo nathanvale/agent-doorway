@@ -12,13 +12,16 @@ import { testFolder } from "./support/test-folder.ts";
 
 setDefaultTimeout(30_000);
 
-const scriptPath = join(import.meta.dir, "../scripts/bootstrap-settings.ts");
+const scriptPath = join(
+  import.meta.dir,
+  "../scripts/import-remote-dev-settings.ts",
+);
 const pilotContainerId =
   "568ba4e66e3b13c188cb206f480b2b81310b8275ae7a355280ce250cf3b69e0e";
 const devboxContainerId =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-function runBootstrap(
+function runImport(
   environment: Record<string, string>,
   ...argv: readonly string[]
 ) {
@@ -92,9 +95,9 @@ function sampleTargetsPayload(root: string) {
   };
 }
 
-describe("bootstrap-settings script", () => {
+describe("import-remote-dev-settings script", () => {
   test("translates remote-dev targets into doorway settings under my-agent-dojo and strips private fields", async () => {
-    const root = testFolder("bootstrap-ok-");
+    const root = testFolder("import-ok-");
     try {
       const xdgConfig = join(root, "xdg-config");
       const sourceDir = join(xdgConfig, "remote-dev");
@@ -111,7 +114,7 @@ describe("bootstrap-settings script", () => {
         JSON.stringify(sampleTargetsPayload(root), null, 2),
       );
 
-      const ran = runBootstrap({
+      const ran = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
         XDG_CONFIG_HOME: xdgConfig,
@@ -186,11 +189,17 @@ describe("bootstrap-settings script", () => {
     }
   });
 
-  test("honors REMOTE_DEV_CONFIG and DOORWAY_SETTINGS overrides", async () => {
-    const root = testFolder("bootstrap-env-");
+  test("honors REMOTE_DEV_CONFIG override and writes to default doorway settings path", async () => {
+    const root = testFolder("import-env-");
     try {
+      const xdgConfig = join(root, "xdg-config");
       const sourceFile = join(root, "custom-targets.json");
-      const destFile = join(root, "custom-doorway", "settings.json");
+      const destFile = join(
+        xdgConfig,
+        "my-agent-dojo",
+        "doorway",
+        "settings.json",
+      );
       const payload = sampleTargetsPayload(root);
       writeFileSync(
         sourceFile,
@@ -202,11 +211,11 @@ describe("bootstrap-settings script", () => {
         }),
       );
 
-      const ran = runBootstrap({
+      const ran = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
+        XDG_CONFIG_HOME: xdgConfig,
         REMOTE_DEV_CONFIG: sourceFile,
-        DOORWAY_SETTINGS: destFile,
       });
 
       expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
@@ -223,8 +232,37 @@ describe("bootstrap-settings script", () => {
     }
   });
 
+  test("refuses and writes nothing when DOORWAY_SETTINGS is set", () => {
+    const root = testFolder("import-doorway-settings-");
+    try {
+      const xdgConfig = join(root, "xdg-config");
+      const sourceFile = join(root, "targets.json");
+      const outsideDir = join(root, "outside");
+      const outsideFile = join(outsideDir, "settings.json");
+      writeFileSync(sourceFile, JSON.stringify(sampleTargetsPayload(root)));
+
+      const ran = runImport({
+        HOME: root,
+        PATH: process.env.PATH ?? "",
+        XDG_CONFIG_HOME: xdgConfig,
+        REMOTE_DEV_CONFIG: sourceFile,
+        DOORWAY_SETTINGS: outsideFile,
+      });
+
+      expect(ran.exitCode).toBe(1);
+      expect(ran.stdout).toBe("");
+      expect(ran.stderr).toContain("DOORWAY_SETTINGS");
+      expect(ran.stderr).toContain("Unset DOORWAY_SETTINGS");
+      expect(existsSync(outsideDir)).toBe(false);
+      expect(existsSync(outsideFile)).toBe(false);
+      expect(existsSync(join(xdgConfig, "my-agent-dojo"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("refuses and writes nothing when destination settings file already exists", () => {
-    const root = testFolder("bootstrap-exists-");
+    const root = testFolder("import-exists-");
     try {
       const xdgConfig = join(root, "xdg-config");
       const sourceDir = join(xdgConfig, "remote-dev");
@@ -239,7 +277,7 @@ describe("bootstrap-settings script", () => {
       const sentinel = '{"keep":"me"}\n';
       writeFileSync(destFile, sentinel);
 
-      const ran = runBootstrap({
+      const ran = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
         XDG_CONFIG_HOME: xdgConfig,
@@ -255,13 +293,13 @@ describe("bootstrap-settings script", () => {
   });
 
   test("refuses and writes nothing when source is missing or invalid without leaking private values", () => {
-    const root = testFolder("bootstrap-invalid-");
+    const root = testFolder("import-invalid-");
     try {
       const xdgConfig = join(root, "xdg-config");
       const destDir = join(xdgConfig, "my-agent-dojo", "doorway");
       const destFile = join(destDir, "settings.json");
 
-      const missing = runBootstrap({
+      const missing = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
         XDG_CONFIG_HOME: xdgConfig,
@@ -276,7 +314,7 @@ describe("bootstrap-settings script", () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(sourceFile, "{not-json");
 
-      const badJson = runBootstrap({
+      const badJson = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
         XDG_CONFIG_HOME: xdgConfig,
@@ -299,7 +337,7 @@ describe("bootstrap-settings script", () => {
           ],
         }),
       );
-      const badSchema = runBootstrap({
+      const badSchema = runImport({
         HOME: root,
         PATH: process.env.PATH ?? "",
         XDG_CONFIG_HOME: xdgConfig,
@@ -315,9 +353,9 @@ describe("bootstrap-settings script", () => {
   });
 
   test("prints usage on --help without writing anything", () => {
-    const root = testFolder("bootstrap-help-");
+    const root = testFolder("import-help-");
     try {
-      const ran = runBootstrap(
+      const ran = runImport(
         {
           HOME: root,
           PATH: process.env.PATH ?? "",
@@ -329,7 +367,7 @@ describe("bootstrap-settings script", () => {
         exitCode: 0,
         stderr: "",
       });
-      expect(ran.stdout).toContain("bootstrap-settings.ts");
+      expect(ran.stdout).toContain("import-remote-dev-settings.ts");
       expect(existsSync(join(root, "xdg-config"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -199,7 +199,7 @@ function readSourceJson(
   }
 }
 
-function runBootstrap(
+function runImport(
   environment: Environment,
   argv: readonly string[],
 ): {
@@ -211,7 +211,7 @@ function runBootstrap(
     return {
       exitCode: 0,
       stdout:
-        "Usage: bun scripts/bootstrap-settings.ts  (translates $REMOTE_DEV_CONFIG or XDG remote-dev/targets.json once into doorway settings.json)\n",
+        "Usage: bun scripts/import-remote-dev-settings.ts  (translates $REMOTE_DEV_CONFIG or XDG remote-dev/targets.json once into doorway's default settings.json)\n",
       stderr: "",
     };
   }
@@ -220,16 +220,30 @@ function runBootstrap(
       exitCode: 2,
       stdout: "",
       stderr:
-        "Unexpected arguments. Run: bun scripts/bootstrap-settings.ts --help\n",
+        "Unexpected arguments. Run: bun scripts/import-remote-dev-settings.ts --help\n",
     };
   }
-  const destinationFile = settingsPath(environment);
+  if (
+    environment.DOORWAY_SETTINGS !== undefined &&
+    environment.DOORWAY_SETTINGS !== ""
+  ) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "Refusing to run with DOORWAY_SETTINGS set: this script writes only to doorway's default settings path. Unset DOORWAY_SETTINGS, or copy the file yourself.\n",
+    };
+  }
+  const destinationFile = settingsPath({
+    ...environment,
+    DOORWAY_SETTINGS: undefined,
+  });
   if (destinationFile === undefined || !isAbsolute(destinationFile)) {
     return {
       exitCode: 1,
       stdout: "",
       stderr:
-        "Cannot determine an absolute doorway settings path from DOORWAY_SETTINGS, XDG_CONFIG_HOME, or HOME.\n",
+        "Cannot determine an absolute doorway settings path from XDG_CONFIG_HOME or HOME.\n",
     };
   }
   if (existsSync(destinationFile)) {
@@ -289,7 +303,7 @@ function runBootstrap(
 }
 
 if (import.meta.main) {
-  const outcome = runBootstrap(process.env, process.argv.slice(2));
+  const outcome = runImport(process.env, process.argv.slice(2));
   if (outcome.stdout !== "") process.stdout.write(outcome.stdout);
   if (outcome.stderr !== "") process.stderr.write(outcome.stderr);
   process.exitCode = outcome.exitCode;
