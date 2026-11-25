@@ -50,6 +50,7 @@ test("help identifies the CLI as doorway and lists its doorway commands", () => 
     const stdout = child.stdout.toString();
     expect(stdout).toContain("Usage: doorway <command> [options]");
     expect(stdout).toContain("Commands for doorway.");
+    expect(stdout).toContain("list (doorway.list)");
     expect(stdout).toContain("open (doorway.open)");
     expect(stdout).toContain("pending (doorway.pending)");
     expect(stdout).toContain("status (doorway.status)");

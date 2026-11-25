@@ -1,7 +1,18 @@
+import { constants } from "node:fs";
+import { access, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { ParsedPath } from "agent-cli-kernel";
 
 export const envExecutablePath = join("/", "usr", "bin", "env");
+
+export async function executableExists(filePath: string): Promise<boolean> {
+  const info = await stat(filePath).catch(() => null);
+  if (info === null || !info.isFile()) return false;
+  return access(filePath, constants.X_OK).then(
+    () => true,
+    () => false,
+  );
+}
 
 export type EnvProgramInvocation = {
   readonly executable: ParsedPath;

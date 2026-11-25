@@ -214,17 +214,20 @@ export function findDestination(
   return { destination, remoteHost };
 }
 
-function asObject(value: unknown): object | undefined {
+export function asObject(value: unknown): object | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value
     : undefined;
 }
 
-function ownField(record: object, key: string): unknown {
+export function ownField(record: object, key: string): unknown {
   return Object.hasOwn(record, key) ? Reflect.get(record, key) : undefined;
 }
 
-function hasOnlyKeys(record: object, allowed: readonly string[]): boolean {
+export function hasOnlyKeys(
+  record: object,
+  allowed: readonly string[],
+): boolean {
   return Object.keys(record).every((key) => allowed.includes(key));
 }
 
@@ -403,7 +406,7 @@ function parseDestination(value: unknown): DestinationSettings | undefined {
   };
 }
 
-function parseSettings(value: unknown): SettingsLoad {
+export function parseSettings(value: unknown): SettingsLoad {
   const record = asObject(value);
   if (
     record === undefined ||
