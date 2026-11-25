@@ -1,5 +1,4 @@
-import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { changing, station } from "agent-cli-kernel";
 import type { ParsedPath, ProgramResult } from "agent-cli-kernel";
 import { programDetails } from "agent-cli-kernel/addons/programs";
@@ -12,7 +11,11 @@ import {
   stationWords,
 } from "./causes.ts";
 import { editorArguments, requiredEditorFolders } from "./editor.ts";
-import { envExecutablePath, isolatedProgram } from "./env-program.ts";
+import {
+  envExecutablePath,
+  executableExists,
+  isolatedProgram,
+} from "./env-program.ts";
 import type { DoorwayState } from "./pending.ts";
 import {
   destinationState,
@@ -20,13 +23,11 @@ import {
   parseInventory,
   sshArguments,
 } from "./remote.ts";
+import { loadDoorwaySettings } from "./settings-load.ts";
 import {
   findDestination,
   homeOf,
   isSafeRemotePath,
-  loadSettings,
-  oldSettingsMessage,
-  settingsPath,
   toolPath,
   unavailableStateMessage,
 } from "./settings.ts";
@@ -80,15 +81,6 @@ async function foldersExist(paths: readonly string[]): Promise<boolean> {
   return true;
 }
 
-async function executableExists(filePath: string): Promise<boolean> {
-  const info = await stat(filePath).catch(() => null);
-  if (info === null || !info.isFile()) return false;
-  return access(filePath, constants.X_OK).then(
-    () => true,
-    () => false,
-  );
-}
-
 type StateRefusal = {
   readonly causeCode:
     | "DOMAIN_DOORWAY_DESTINATION_HELD"
@@ -123,16 +115,6 @@ function stateRefusal(outcome: Refusal, destinationName: string): StateRefusal {
         message: `Doorway state refused coordination: ${outcome.kind}.`,
       };
   }
-}
-
-function settingsMissingMessage(
-  environment: Environment,
-  settingsFile: string,
-): string {
-  return (
-    oldSettingsMessage(environment) ??
-    `Settings file not found at ${settingsFile}.`
-  );
 }
 
 function supersededNote(superseded: readonly string[] | undefined): string {
@@ -521,41 +503,12 @@ export function openCommand(
           },
           { message: stateProblem, data: null, effects: nothingChanged },
         );
-      const settingsFile = settingsPath(environment);
-      if (settingsFile === undefined)
+      const loaded = await loadDoorwaySettings(environment);
+      if (!loaded.ok)
         return context.result(
+          { commandIdentity: identity, causeCode: loaded.causeCode },
           {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-          },
-          {
-            message:
-              "Doorway cannot determine an absolute settings path because neither XDG_CONFIG_HOME nor HOME is an absolute path.",
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-      const loaded = await loadSettings(settingsFile);
-      if (loaded.kind === "missing")
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-          },
-          {
-            message: settingsMissingMessage(environment, settingsFile),
-            data: null,
-            effects: nothingChanged,
-          },
-        );
-      if (loaded.kind === "invalid")
-        return context.result(
-          {
-            commandIdentity: identity,
-            causeCode: "DOMAIN_DOORWAY_SETTINGS_INVALID",
-          },
-          {
-            message: `Settings file at ${settingsFile} is invalid: ${loaded.reason}`,
+            message: loaded.message,
             data: null,
             effects: nothingChanged,
           },

@@ -9,6 +9,7 @@ import {
   nothingChanged,
   unchangedSuccess,
 } from "./causes.ts";
+import { listCommand } from "./list.ts";
 import { openCommand } from "./open.ts";
 import { pendingCommand } from "./pending.ts";
 import type { DoorwayState } from "./pending.ts";
@@ -44,6 +45,7 @@ function buildCommands(
 ) {
   return [
     status,
+    listCommand(environment, parsePath),
     openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
     pendingCommand(state, stateFolder, environment),
   ] as const;
