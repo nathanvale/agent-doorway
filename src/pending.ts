@@ -44,19 +44,17 @@ export function pendingCommand(
         ...stationWords,
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-        trigger:
-          "The doorway state folder is unreadable or corrupt, or is left at the old default place outside my-agent-dojo.",
+        trigger: "The doorway state folder is unreadable or corrupt.",
         repairAction:
-          "When the message names an old state folder, run the move command it gives; doorway never reads or moves the old folder itself. Otherwise inspect the state folder named in the message and repair or move it aside before running doorway again.",
+          "Inspect the state folder named in the message and repair or move it aside before running doorway again.",
         guidance: {
           handoff: {
             owner: "operator",
-            reason:
-              "The doorway state folder cannot be read, or is left at its old default place.",
+            reason: "The doorway state folder cannot be read.",
             inspect: [
               {
                 kind: "instruction",
-                text: "Inspect the doorway state folder named in the message, or run the move command the message gives.",
+                text: "Inspect the doorway state folder named in the message.",
               },
             ],
           },

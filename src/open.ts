@@ -160,9 +160,9 @@ export function openCommand(
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
         trigger:
-          "The doorway state folder is unavailable, is left at the old default place outside my-agent-dojo, refused coordination, sits on a filesystem that cannot clear unfinished cases, or could not record the operation before starting the isolated editor.",
+          "The doorway state folder is unavailable, refused coordination, sits on a filesystem that cannot clear unfinished cases, or could not record the operation before starting the isolated editor.",
         repairAction:
-          "When the message names an old state folder, run the move command it gives; doorway never reads or moves the old folder itself. Otherwise inspect the state folder (DOORWAY_STATE, or the default place inside my-agent-dojo), including filesystem support and owner lease readability, before running doorway open again.",
+          "Inspect the state folder (DOORWAY_STATE, or the default place inside my-agent-dojo), including filesystem support and owner lease readability, before running doorway open again.",
         guidance: { handoff: inspectPending },
         independentObservable: `${identity}:state-unavailable`,
       }),

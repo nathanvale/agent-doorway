@@ -294,14 +294,13 @@ export function listCommand(
         ...stationWords,
         commandIdentity: identity,
         causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-        trigger:
-          "The doorway settings file does not exist, or a settings file is left only at the old default place outside my-agent-dojo.",
+        trigger: "The doorway settings file does not exist.",
         repairAction:
-          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file. When the message names an old settings file, run the move command it gives; doorway never reads or moves the old file itself.",
+          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file.",
         guidance: {
           next: {
             kind: "instruction",
-            text: "Create the settings file, set DOORWAY_SETTINGS, or run the move command in the message, then run doorway list again.",
+            text: "Create the settings file or set DOORWAY_SETTINGS, then run doorway list again.",
           },
         },
         independentObservable: `${identity}:settings-missing`,

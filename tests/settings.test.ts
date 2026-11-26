@@ -15,8 +15,6 @@ import {
   homeOf,
   isSafeRemotePath,
   loadSettings,
-  oldSettingsMessage,
-  oldStateMessage,
   settingsPath,
   statePath,
   toolPath,
@@ -160,24 +158,6 @@ describe("settings and state paths", () => {
           DOORWAY_STATE: customState,
         }),
       ).toBe(customState);
-
-      const legacySettings = join(
-        folder,
-        ".config",
-        "doorway",
-        "settings.json",
-      );
-      const legacyState = join(folder, ".local", "state", "doorway");
-      mkdirSync(join(folder, ".config", "doorway"), { recursive: true });
-      mkdirSync(legacyState, { recursive: true });
-      writeFileSync(legacySettings, "{}");
-
-      expect(
-        oldSettingsMessage({ HOME: folder, XDG_CONFIG_HOME: "relative/bad" }),
-      ).toContain(legacySettings);
-      expect(
-        oldStateMessage({ HOME: folder, XDG_STATE_HOME: "relative/bad" }),
-      ).toContain(legacyState);
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
