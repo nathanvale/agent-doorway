@@ -1,17 +1,6 @@
 {
   "kind": "health",
   "finding_counts": {
-    "src/open.ts": {
-      "complexity_critical": {
-        "count": 1
-      },
-      "complexity_moderate": {
-        "count": 1
-      },
-      "crap_critical": {
-        "count": 1
-      }
-    },
     "src/settings.ts": {
       "complexity_critical": {
         "count": 2
@@ -27,19 +16,6 @@
     }
   },
   "identity_finding_counts": {
-    "src/open.ts\u0000<file>": {
-      "complexity_moderate": {
-        "count": 1
-      }
-    },
-    "src/open.ts\u0000run": {
-      "complexity_critical": {
-        "count": 1
-      },
-      "crap_critical": {
-        "count": 1
-      }
-    },
     "src/settings.ts\u0000parseDestination": {
       "complexity_critical": {
         "count": 1
