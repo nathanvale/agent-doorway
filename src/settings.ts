@@ -131,7 +131,11 @@ function xdgBase(
 
 export function settingsPath(environment: Environment): string | undefined {
   const override = nonEmpty(environment.DOORWAY_SETTINGS);
-  if (override !== undefined) return expandHome(override, homeOf(environment));
+  if (override !== undefined) {
+    if (!override.startsWith("~/")) return override;
+    const home = homeOf(environment);
+    return home === undefined ? undefined : `${home}/${override.slice(2)}`;
+  }
   const base = xdgBase(environment, "config");
   return base === undefined
     ? undefined

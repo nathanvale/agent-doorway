@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { settingsPath } from "../src/settings.ts";
 import { settingsLimitBytes } from "../src/settings-file.ts";
 import { testFolder } from "./support/test-folder.ts";
 
@@ -406,6 +407,72 @@ describe("rooted settings reads through doorway CLI", () => {
       }
     } finally {
       chmodSync(unreadable, 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("DOORWAY_SETTINGS overrides reach rooted read unnormalised and decline link/.. in absolute and ~/ forms", () => {
+    const root = testFolder("cli-rooted-override-class-");
+    try {
+      const xDir = join(root, "x");
+      const linkedTarget = join(root, "outside", "child");
+      mkdirSync(xDir, { recursive: true });
+      mkdirSync(linkedTarget, { recursive: true });
+      const validText = createValidSettingsText(root);
+      writeFileSync(join(xDir, "settings.json"), validText);
+      writeFileSync(join(root, "settings.json"), validText);
+      symlinkSync(linkedTarget, join(root, "hl"));
+
+      const xdg = join(root, "xdg");
+      const stateDir = join(root, "state");
+      const cases = [
+        {
+          override: `${root}/x/settings.json`,
+          expectedPath: `${root}/x/settings.json`,
+          expectedExit: 0,
+          expectedCause: "SUCCESS_UNCHANGED",
+        },
+        {
+          override: "~/x/settings.json",
+          expectedPath: `${root}/x/settings.json`,
+          expectedExit: 0,
+          expectedCause: "SUCCESS_UNCHANGED",
+        },
+        {
+          override: `${root}/hl/../settings.json`,
+          expectedPath: `${root}/hl/../settings.json`,
+          expectedExit: 3,
+          expectedCause: "DOMAIN_DOORWAY_SETTINGS_INVALID",
+        },
+        {
+          override: "~/hl/../settings.json",
+          expectedPath: `${root}/hl/../settings.json`,
+          expectedExit: 3,
+          expectedCause: "DOMAIN_DOORWAY_SETTINGS_INVALID",
+        },
+      ] as const;
+
+      for (const entry of cases) {
+        const env: Record<string, string> = {
+          PATH: process.env.PATH ?? "",
+          HOME: root,
+          XDG_CONFIG_HOME: xdg,
+          DOORWAY_SETTINGS: entry.override,
+          DOORWAY_STATE: stateDir,
+        };
+        expect(settingsPath(env)).toBe(entry.expectedPath);
+        const ran = invokeCli(env, "list", "--json");
+        expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+          exitCode: entry.expectedExit,
+          stderr: "",
+        });
+        const envelope = parseEnvelope(ran.stdout);
+        expect(envelope.causeCode).toBe(entry.expectedCause);
+        if (entry.expectedExit !== 0) {
+          expect(envelope.message).toContain(entry.expectedPath);
+        }
+      }
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
