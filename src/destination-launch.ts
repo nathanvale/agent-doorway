@@ -25,6 +25,7 @@ import {
   findDestination,
   homeOf,
   isSafeRemotePath,
+  statePath,
   toolPath,
   unavailableStateMessage,
 } from "./settings.ts";
@@ -142,12 +143,11 @@ export async function prepareDestination(
   input: { readonly destination: string; readonly place?: string | undefined },
   options: { readonly requireAllowStart?: boolean } = {},
 ): Promise<PrepareDestinationResult> {
-  const stateProblem = unavailableStateMessage(environment);
-  if (stateProblem !== undefined)
+  if (statePath(environment) === undefined)
     return {
       ok: false,
       causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
-      message: stateProblem,
+      message: unavailableStateMessage,
     };
   const loaded = await loadDoorwaySettings(environment);
   if (!loaded.ok)

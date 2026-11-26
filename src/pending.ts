@@ -8,7 +8,6 @@ import {
   unchangedSuccess,
 } from "./causes.ts";
 import { unavailableStateMessage } from "./settings.ts";
-import type { Environment } from "./settings.ts";
 
 export type DoorwayState = ReturnType<typeof stateAddon>;
 
@@ -17,7 +16,6 @@ const identity = "doorway.pending";
 export function pendingCommand(
   state: DoorwayState,
   stateFolder: string | undefined,
-  environment: Environment,
 ) {
   return command({
     identity,
@@ -63,15 +61,14 @@ export function pendingCommand(
       }),
     ],
     run: (_input, context) => {
-      const stateProblem = unavailableStateMessage(environment, stateFolder);
-      if (stateProblem !== undefined || stateFolder === undefined)
+      if (stateFolder === undefined)
         return context.result(
           {
             commandIdentity: identity,
             causeCode: "DOMAIN_DOORWAY_STATE_UNAVAILABLE",
           },
           {
-            message: stateProblem ?? "",
+            message: unavailableStateMessage,
             data: null,
             effects: nothingChanged,
           },

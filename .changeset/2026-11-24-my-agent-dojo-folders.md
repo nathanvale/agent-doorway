@@ -2,6 +2,6 @@
 "agent-doorway": major
 ---
 
-Moved the default settings file to <config base>/my-agent-dojo/doorway/settings.json and the default state folder to <state base>/my-agent-dojo/doorway; doorway open and doorway pending now refuse, with the move command, when only the old place exists.
+Moved the default settings file to <config base>/my-agent-dojo/doorway/settings.json and the default state folder to <state base>/my-agent-dojo/doorway. DOORWAY_SETTINGS and DOORWAY_STATE still override both places.
 
-Action: If a settings file or state folder is left at the old place, run the mkdir -p and mv command that doorway open or doorway pending prints. DOORWAY_SETTINGS and DOORWAY_STATE still override both places.
+Action: Move any existing settings file or state folder to the new default places yourself, or set DOORWAY_SETTINGS and DOORWAY_STATE to keep using their current locations.
