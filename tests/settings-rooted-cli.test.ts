@@ -26,7 +26,16 @@ function invokeCli(
   environment: Record<string, string>,
   ...argv: readonly string[]
 ) {
+  return invokeCliIn(undefined, environment, ...argv);
+}
+
+function invokeCliIn(
+  cwd: string | undefined,
+  environment: Record<string, string>,
+  ...argv: readonly string[]
+) {
   const ran = Bun.spawnSync([process.execPath, "run", cliEntry, ...argv], {
+    ...(cwd === undefined ? {} : { cwd }),
     env: environment,
     stdout: "pipe",
     stderr: "pipe",
@@ -321,6 +330,82 @@ describe("rooted settings reads through doorway CLI", () => {
         expect(envelope.message).toContain("mv ");
       }
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("doorway list and open decline relative DOORWAY_SETTINGS overrides before any read", () => {
+    const root = testFolder("cli-rooted-relative-");
+    try {
+      const localDir = join(root, "local");
+      const physicalChild = join(root, "physical", "child");
+      mkdirSync(localDir, { recursive: true });
+      mkdirSync(physicalChild, { recursive: true });
+      writeFileSync(
+        join(localDir, "settings.json"),
+        createValidSettingsText(root),
+      );
+      writeFileSync(
+        join(root, "physical", "settings.json"),
+        JSON.stringify({ version: 0 }),
+      );
+      symlinkSync(physicalChild, join(localDir, "link"));
+
+      for (const override of ["link/../settings.json", "settings.json"]) {
+        const env: Record<string, string> = {
+          PATH: process.env.PATH ?? "",
+          HOME: root,
+          XDG_CONFIG_HOME: join(root, "xdg"),
+          DOORWAY_SETTINGS: override,
+          DOORWAY_STATE: join(root, "state"),
+        };
+        for (const argv of [
+          ["list", "--json"],
+          ["open", "example", "--json"],
+        ]) {
+          const ran = invokeCliIn(localDir, env, ...argv);
+          expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+            exitCode: 3,
+            stderr: "",
+          });
+          const envelope = parseEnvelope(ran.stdout);
+          expect(envelope.causeCode).toBe("DOMAIN_DOORWAY_SETTINGS_INVALID");
+          expect(envelope.message).toContain("absolute path");
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("doorway list and open decline an unreadable settings file as invalid", () => {
+    const root = testFolder("cli-rooted-unreadable-");
+    const unreadable = join(root, "settings.json");
+    try {
+      writeFileSync(unreadable, createValidSettingsText(root));
+      chmodSync(unreadable, 0o000);
+      const env: Record<string, string> = {
+        PATH: process.env.PATH ?? "",
+        HOME: root,
+        XDG_CONFIG_HOME: join(root, "xdg"),
+        DOORWAY_SETTINGS: unreadable,
+        DOORWAY_STATE: join(root, "state"),
+      };
+      for (const argv of [
+        ["list", "--json"],
+        ["open", "example", "--json"],
+      ]) {
+        const ran = invokeCli(env, ...argv);
+        expect({ exitCode: ran.exitCode, stderr: ran.stderr }).toEqual({
+          exitCode: 3,
+          stderr: "",
+        });
+        const envelope = parseEnvelope(ran.stdout);
+        expect(envelope.causeCode).toBe("DOMAIN_DOORWAY_SETTINGS_INVALID");
+        expect(envelope.message).toContain("Could not read settings file");
+      }
+    } finally {
+      chmodSync(unreadable, 0o644);
       rmSync(root, { recursive: true, force: true });
     }
   });

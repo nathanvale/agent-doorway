@@ -1,5 +1,6 @@
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { readRootedFile } from "agent-cli-kernel/rooted-file";
+import type { RootedFileResult } from "agent-cli-kernel/rooted-file";
 
 export const settingsLimitBytes = 1_048_576;
 
@@ -18,9 +19,23 @@ export function readSettingsJson(
   pathValue: string,
   root?: string,
 ): SettingsJsonRead {
-  const target = isAbsolute(pathValue) ? pathValue : resolve(pathValue);
-  const effectiveRoot = root ?? defaultSettingsRoot(target);
-  const result = readRootedFile(effectiveRoot, target, settingsLimitBytes);
+  if (!isAbsolute(pathValue)) {
+    return {
+      kind: "invalid",
+      reason: "Settings path override must be an absolute path.",
+    };
+  }
+  const effectiveRoot = root ?? defaultSettingsRoot(pathValue);
+  let result: RootedFileResult;
+  try {
+    result = readRootedFile(effectiveRoot, pathValue, settingsLimitBytes);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      kind: "invalid",
+      reason: `Could not read settings file: ${detail}`,
+    };
+  }
   if (result.kind === "missing") return { kind: "missing" };
   if (result.kind === "refused")
     return { kind: "invalid", reason: result.message };

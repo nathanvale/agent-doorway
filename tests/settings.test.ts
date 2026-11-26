@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   linkSync,
   mkdirSync,
   rmSync,
@@ -420,6 +421,29 @@ describe("loading settings and finding destinations", () => {
       expect(escapeResult.kind).toBe("invalid");
       if (escapeResult.kind === "invalid") {
         expect(escapeResult.reason).toContain("outside root");
+      }
+
+      for (const relativeTarget of ["settings.json", "link/../settings.json"]) {
+        const relativeResult = await loadSettings(relativeTarget);
+        expect(relativeResult.kind).toBe("invalid");
+        if (relativeResult.kind === "invalid") {
+          expect(relativeResult.reason).toContain("absolute path");
+        }
+      }
+
+      const unreadableFile = join(folder, "unreadable-settings.json");
+      writeFileSync(unreadableFile, content);
+      chmodSync(unreadableFile, 0o000);
+      try {
+        const unreadableResult = await loadSettings(unreadableFile);
+        expect(unreadableResult.kind).toBe("invalid");
+        if (unreadableResult.kind === "invalid") {
+          expect(unreadableResult.reason).toContain(
+            "Could not read settings file",
+          );
+        }
+      } finally {
+        chmodSync(unreadableFile, 0o644);
       }
     } finally {
       rmSync(folder, { recursive: true, force: true });
