@@ -1846,7 +1846,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
         cli,
         commands: [
           openCommand(failingJournalState, fixture.environment, parsePath),
-          pendingCommand(realState, fixture.stateFolder, fixture.environment),
+          pendingCommand(realState, fixture.stateFolder),
         ],
         causes,
         state: realState.descriptor,
@@ -2040,7 +2040,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
           cli,
           commands: [
             openCommand(stubState, fixture.environment, parsePath),
-            pendingCommand(realState, fixture.stateFolder, fixture.environment),
+            pendingCommand(realState, fixture.stateFolder),
           ],
           causes,
           state: realState.descriptor,
@@ -2125,7 +2125,7 @@ describe("doorway open and doorway pending through the real CLI", () => {
         cli,
         commands: [
           openCommand(failingJournalState, fixture.environment, parsePath),
-          pendingCommand(realState, fixture.stateFolder, fixture.environment),
+          pendingCommand(realState, fixture.stateFolder),
         ],
         causes,
         state: realState.descriptor,

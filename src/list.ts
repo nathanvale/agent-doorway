@@ -7,6 +7,7 @@ import {
   stationWords,
   unchangedSuccess,
 } from "./causes.ts";
+import { settingsMissingStation } from "./destination-stations.ts";
 import {
   envExecutablePath,
   executableExists,
@@ -290,21 +291,7 @@ export function listCommand(
         guidance: { next: { kind: "done" } },
         independentObservable: `${identity}:listed`,
       }),
-      station(causes, {
-        ...stationWords,
-        commandIdentity: identity,
-        causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-        trigger: "The doorway settings file does not exist.",
-        repairAction:
-          "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file.",
-        guidance: {
-          next: {
-            kind: "instruction",
-            text: "Create the settings file or set DOORWAY_SETTINGS, then run doorway list again.",
-          },
-        },
-        independentObservable: `${identity}:settings-missing`,
-      }),
+      settingsMissingStation(identity, "doorway list"),
       station(causes, {
         ...stationWords,
         commandIdentity: identity,

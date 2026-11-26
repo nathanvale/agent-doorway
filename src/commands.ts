@@ -49,7 +49,7 @@ function buildCommands(
     listCommand(environment, parsePath),
     openCommand(state, environment, parsePath, editorTimeoutMilliseconds),
     startCommand(state, environment, parsePath, editorTimeoutMilliseconds),
-    pendingCommand(state, stateFolder, environment),
+    pendingCommand(state, stateFolder),
   ] as const;
 }
 

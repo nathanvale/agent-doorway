@@ -2,26 +2,33 @@ import { station } from "agent-cli-kernel";
 import { causes, completedSuccess, stationWords } from "./causes.ts";
 import { inspectPending, pendingCommandStep } from "./destination-launch.ts";
 
+export function settingsMissingStation<Identity extends string>(
+  identity: Identity,
+  commandLabel: string,
+) {
+  return station(causes, {
+    ...stationWords,
+    commandIdentity: identity,
+    causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
+    trigger: "The doorway settings file does not exist.",
+    repairAction:
+      "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file.",
+    guidance: {
+      next: {
+        kind: "instruction",
+        text: `Create the settings file or set DOORWAY_SETTINGS, then run ${commandLabel} again.`,
+      },
+    },
+    independentObservable: `${identity}:settings-missing`,
+  });
+}
+
 export function commonDestinationStations<Identity extends string>(
   identity: Identity,
   commandLabel: string,
 ) {
   return [
-    station(causes, {
-      ...stationWords,
-      commandIdentity: identity,
-      causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-      trigger: "The doorway settings file does not exist.",
-      repairAction:
-        "Create the doorway settings file or set DOORWAY_SETTINGS to an existing settings file.",
-      guidance: {
-        next: {
-          kind: "instruction",
-          text: `Create the settings file or set DOORWAY_SETTINGS, then run ${commandLabel} again.`,
-        },
-      },
-      independentObservable: `${identity}:settings-missing`,
-    }),
+    settingsMissingStation(identity, commandLabel),
     station(causes, {
       ...stationWords,
       commandIdentity: identity,

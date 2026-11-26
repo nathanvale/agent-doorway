@@ -148,14 +148,8 @@ export function statePath(environment: Environment): string | undefined {
   return base === undefined ? undefined : join(base, ...dojoDoorway);
 }
 
-export function unavailableStateMessage(
-  environment: Environment,
-  resolvedStateFolder: string | undefined = statePath(environment),
-): string | undefined {
-  if (resolvedStateFolder === undefined)
-    return "Doorway cannot determine an absolute state folder because neither XDG_STATE_HOME nor HOME is an absolute path.";
-  return undefined;
-}
+export const unavailableStateMessage =
+  "Doorway cannot determine an absolute state folder because neither XDG_STATE_HOME nor HOME is an absolute path.";
 
 export function toolPath(
   settings: DoorwaySettings,
