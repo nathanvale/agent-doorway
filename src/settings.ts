@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { readSettingsJson } from "./settings-file.ts";
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -130,7 +131,11 @@ function xdgBase(
 
 export function settingsPath(environment: Environment): string | undefined {
   const override = nonEmpty(environment.DOORWAY_SETTINGS);
-  if (override !== undefined) return expandHome(override, homeOf(environment));
+  if (override !== undefined) {
+    if (!override.startsWith("~/")) return override;
+    const home = homeOf(environment);
+    return home === undefined ? undefined : `${home}/${override.slice(2)}`;
+  }
   const base = xdgBase(environment, "config");
   return base === undefined
     ? undefined
@@ -484,14 +489,11 @@ export function parseSettings(value: unknown): SettingsLoad {
   };
 }
 
-export async function loadSettings(pathValue: string): Promise<SettingsLoad> {
-  const file = Bun.file(pathValue);
-  if (!(await file.exists())) return { kind: "missing" };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await file.text());
-  } catch {
-    return { kind: "invalid", reason: "Settings file is not valid JSON." };
-  }
-  return parseSettings(parsed);
+export function loadSettings(
+  pathValue: string,
+  root?: string,
+): Promise<SettingsLoad> {
+  const read = readSettingsJson(pathValue, root);
+  if (read.kind !== "json") return Promise.resolve(read);
+  return Promise.resolve(parseSettings(read.value));
 }

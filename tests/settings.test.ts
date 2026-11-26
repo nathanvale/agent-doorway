@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +21,7 @@ import {
   statePath,
   toolPath,
 } from "../src/settings.ts";
+import { settingsLimitBytes } from "../src/settings-file.ts";
 import { testFolder } from "./support/test-folder.ts";
 
 const sampleContainerId =
@@ -343,5 +351,102 @@ describe("loading settings and finding destinations", () => {
     expect(isSafeRemotePath("/workspace//other")).toBe(false);
     expect(isSafeRemotePath("/workspace/bad\nname")).toBe(false);
     expect(isSafeRemotePath("/workspace/bad'name")).toBe(false);
+  });
+
+  test("refuses symbolic links, linked folders, hard links, folders, escapes, and over-limit files", async () => {
+    const folder = testFolder("settings-rooted-");
+    try {
+      const realDir = join(folder, "real");
+      mkdirSync(realDir, { recursive: true });
+      const realFile = join(realDir, "settings.json");
+      const content = JSON.stringify(validSettings(folder));
+      writeFileSync(realFile, content);
+
+      const linkFile = join(folder, "linked-settings.json");
+      symlinkSync(realFile, linkFile);
+      const linkedFileResult = await loadSettings(linkFile);
+      expect(linkedFileResult.kind).toBe("invalid");
+      if (linkedFileResult.kind === "invalid") {
+        expect(linkedFileResult.reason).toContain("symbolic link");
+      }
+
+      const linkedDir = join(folder, "linked-dir");
+      symlinkSync(realDir, linkedDir);
+      const linkedDirResult = await loadSettings(
+        join(linkedDir, "settings.json"),
+      );
+      expect(linkedDirResult.kind).toBe("invalid");
+      if (linkedDirResult.kind === "invalid") {
+        expect(linkedDirResult.reason).toContain("linked folder");
+      }
+
+      const hardLinkFile = join(folder, "hard-linked-settings.json");
+      linkSync(realFile, hardLinkFile);
+      const hardLinkResult = await loadSettings(hardLinkFile);
+      expect(hardLinkResult.kind).toBe("invalid");
+      if (hardLinkResult.kind === "invalid") {
+        expect(hardLinkResult.reason).toContain("hard link");
+      }
+      rmSync(hardLinkFile, { force: true });
+
+      const folderAsFile = join(folder, "folder-as-file.json");
+      mkdirSync(folderAsFile, { recursive: true });
+      const folderResult = await loadSettings(folderAsFile);
+      expect(folderResult.kind).toBe("invalid");
+      if (folderResult.kind === "invalid") {
+        expect(folderResult.reason).toContain("not a regular file");
+      }
+
+      const hugeFile = join(folder, "huge-settings.json");
+      writeFileSync(
+        hugeFile,
+        `${" ".repeat(settingsLimitBytes + 1 - content.length)}${content}`,
+      );
+      const hugeResult = await loadSettings(hugeFile);
+      expect(hugeResult.kind).toBe("invalid");
+      if (hugeResult.kind === "invalid") {
+        expect(hugeResult.reason).toContain("byte limit");
+      }
+
+      const exactFile = join(folder, "exact-settings.json");
+      writeFileSync(
+        exactFile,
+        `${" ".repeat(settingsLimitBytes - content.length)}${content}`,
+      );
+      expect((await loadSettings(exactFile)).kind).toBe("ok");
+
+      const otherDir = join(folder, "other");
+      mkdirSync(otherDir, { recursive: true });
+      const escapeResult = await loadSettings(realFile, otherDir);
+      expect(escapeResult.kind).toBe("invalid");
+      if (escapeResult.kind === "invalid") {
+        expect(escapeResult.reason).toContain("outside root");
+      }
+
+      for (const relativeTarget of ["settings.json", "link/../settings.json"]) {
+        const relativeResult = await loadSettings(relativeTarget);
+        expect(relativeResult.kind).toBe("invalid");
+        if (relativeResult.kind === "invalid") {
+          expect(relativeResult.reason).toContain("absolute path");
+        }
+      }
+
+      const unreadableFile = join(folder, "unreadable-settings.json");
+      writeFileSync(unreadableFile, content);
+      chmodSync(unreadableFile, 0o000);
+      try {
+        const unreadableResult = await loadSettings(unreadableFile);
+        expect(unreadableResult.kind).toBe("invalid");
+        if (unreadableResult.kind === "invalid") {
+          expect(unreadableResult.reason).toContain(
+            "Could not read settings file",
+          );
+        }
+      } finally {
+        chmodSync(unreadableFile, 0o644);
+      }
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 });

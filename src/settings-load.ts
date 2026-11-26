@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { loadSettings, oldSettingsMessage, settingsPath } from "./settings.ts";
 import type { DoorwaySettings, Environment } from "./settings.ts";
 
@@ -23,7 +24,13 @@ export async function loadDoorwaySettings(
         "Doorway cannot determine an absolute settings path because neither XDG_CONFIG_HOME nor HOME is an absolute path.",
     };
   }
-  const loaded = await loadSettings(settingsFile);
+  const hasOverride =
+    environment.DOORWAY_SETTINGS !== undefined &&
+    environment.DOORWAY_SETTINGS !== "";
+  const root = hasOverride
+    ? undefined
+    : dirname(dirname(dirname(settingsFile)));
+  const loaded = await loadSettings(settingsFile, root);
   if (loaded.kind === "missing") {
     return {
       ok: false,
