@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { readSettingsJson } from "./settings-file.ts";
 
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -149,49 +148,13 @@ export function statePath(environment: Environment): string | undefined {
   return base === undefined ? undefined : join(base, ...dojoDoorway);
 }
 
-function singleQuoted(pathValue: string): string {
-  return `'${pathValue.replaceAll("'", "'\\''")}'`;
-}
-
-function oldPlaceMessage(
-  subject: "settings file" | "state folder",
-  oldPath: string,
-  newPath: string,
-): string | undefined {
-  if (existsSync(newPath) || !existsSync(oldPath)) return undefined;
-  const move = `mkdir -p ${singleQuoted(dirname(newPath))} && mv ${singleQuoted(oldPath)} ${singleQuoted(newPath)}`;
-  return `The doorway ${subject} is at its old place ${oldPath}. Doorway now uses ${newPath} and does not read or move the old one. Move it, then run doorway again: ${move}`;
-}
-
-export function oldSettingsMessage(env: Environment): string | undefined {
-  if (nonEmpty(env.DOORWAY_SETTINGS) !== undefined) return undefined;
-  const base = xdgBase(env, "config");
-  if (base === undefined) return undefined;
-  return oldPlaceMessage(
-    "settings file",
-    join(base, "doorway", "settings.json"),
-    join(base, ...dojoDoorway, "settings.json"),
-  );
-}
-
-export function oldStateMessage(env: Environment): string | undefined {
-  if (nonEmpty(env.DOORWAY_STATE) !== undefined) return undefined;
-  const base = xdgBase(env, "state");
-  if (base === undefined) return undefined;
-  return oldPlaceMessage(
-    "state folder",
-    join(base, "doorway"),
-    join(base, ...dojoDoorway),
-  );
-}
-
 export function unavailableStateMessage(
   environment: Environment,
   resolvedStateFolder: string | undefined = statePath(environment),
 ): string | undefined {
   if (resolvedStateFolder === undefined)
     return "Doorway cannot determine an absolute state folder because neither XDG_STATE_HOME nor HOME is an absolute path.";
-  return oldStateMessage(environment);
+  return undefined;
 }
 
 export function toolPath(

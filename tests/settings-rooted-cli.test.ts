@@ -300,14 +300,20 @@ describe("rooted settings reads through doorway CLI", () => {
     }
   });
 
-  test("doorway list and open preserve DOMAIN_DOORWAY_SETTINGS_MISSING and the old-place move message", () => {
+  test("doorway list and open report only the my-agent-dojo settings path as missing when only a legacy settings file exists", () => {
     const root = testFolder("cli-rooted-missing-");
     try {
       const xdg = join(root, "xdg");
-      const oldDir = join(xdg, "doorway");
-      mkdirSync(oldDir, { recursive: true });
-      const oldSettings = join(oldDir, "settings.json");
-      writeFileSync(oldSettings, "{}");
+      const legacyDir = join(xdg, "doorway");
+      mkdirSync(legacyDir, { recursive: true });
+      const legacySettings = join(legacyDir, "settings.json");
+      writeFileSync(legacySettings, "{}");
+      const expectedSettings = join(
+        xdg,
+        "my-agent-dojo",
+        "doorway",
+        "settings.json",
+      );
 
       const env: Record<string, string> = {
         PATH: process.env.PATH ?? "",
@@ -327,8 +333,10 @@ describe("rooted settings reads through doorway CLI", () => {
         });
         const envelope = parseEnvelope(ran.stdout);
         expect(envelope.causeCode).toBe("DOMAIN_DOORWAY_SETTINGS_MISSING");
-        expect(envelope.message).toContain(oldSettings);
-        expect(envelope.message).toContain("mv ");
+        expect(envelope.message).toBe(
+          `Settings file not found at ${expectedSettings}.`,
+        );
+        expect(envelope.message).not.toContain(legacySettings);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

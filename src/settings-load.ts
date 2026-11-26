@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import { loadSettings, oldSettingsMessage, settingsPath } from "./settings.ts";
+import { loadSettings, settingsPath } from "./settings.ts";
 import type { DoorwaySettings, Environment } from "./settings.ts";
 
 export type DoorwaySettingsOutcome =
@@ -35,9 +35,7 @@ export async function loadDoorwaySettings(
     return {
       ok: false,
       causeCode: "DOMAIN_DOORWAY_SETTINGS_MISSING",
-      message:
-        oldSettingsMessage(environment) ??
-        `Settings file not found at ${settingsFile}.`,
+      message: `Settings file not found at ${settingsFile}.`,
     };
   }
   if (loaded.kind === "invalid") {
